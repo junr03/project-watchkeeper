@@ -158,8 +158,11 @@ class MonitoringScheduler:
                       (token, lease_until, stamp, row["run_id"]))
             c.commit()
         cursor = json.loads(row["cursor_json"]) if row["cursor_json"] else None
+        schedule_parts = row["schedule_key"].split(":")
+        stream = "history" if len(schedule_parts) > 2 and schedule_parts[2] == "history" else "recent"
         review_input = review_input_builder(cursor=cursor, limit=self.window_limit,
-                                            byte_limit=self.window_byte_limit)
+                                            byte_limit=self.window_byte_limit,
+                                            recent=stream == "recent")
         refs = {item["observation_id"]: {"revision": item["revision"],
                                          "source_id": item["source_id"],
                                          "thread_id": item["thread_id"]}
@@ -185,8 +188,6 @@ class MonitoringScheduler:
                     "watermark_captured_at": thread.get("last_progress_captured_at") if isinstance(thread, dict) else None}
                 if not isinstance(thread, dict) or thread.get("coverage_complete") is not True:
                     partial_threads.append([source_id, thread_id])
-        schedule_parts = row["schedule_key"].split(":")
-        stream = "history" if len(schedule_parts) > 2 and schedule_parts[2] == "history" else "recent"
         snapshot = {"stream": stream, "revisions": refs, "thread_guard": thread_guard,
                     "partial_threads": partial_threads,
                     "next_cursor": review_input.get("coverage", {}).get("next_cursor"),
@@ -285,10 +286,9 @@ class MonitoringScheduler:
                 history_cursor = json.dumps(next_cursor, sort_keys=True) if has_more and next_cursor else None
                 c.execute("INSERT INTO review_progress(stream,cursor_json,updated_at) VALUES('history',?,?) ON CONFLICT(stream) DO UPDATE SET cursor_json=excluded.cursor_json,updated_at=excluded.updated_at",
                           (history_cursor, stamp))
-            elif history_cursor is None and has_more and next_cursor:
-                history_cursor = json.dumps(next_cursor, sort_keys=True)
-                c.execute("INSERT INTO review_progress(stream,cursor_json,updated_at) VALUES('history',?,?) ON CONFLICT(stream) DO UPDATE SET cursor_json=excluded.cursor_json,updated_at=excluded.updated_at",
-                          (history_cursor, stamp))
+            recent_has_backlog = (stream == "recent" and
+                                  snapshot.get("has_more") is True and
+                                  bool(snapshot.get("revisions")))
             c.execute("UPDATE monitoring_runs SET status='complete',cursor_json=?,snapshot_json=NULL,lease_token=NULL,lease_until=NULL,failure_kind=NULL,updated_at=? WHERE run_id=?",
                       (None, stamp, run_id))
             date_key = key.split(":", 2)[1]
@@ -297,7 +297,7 @@ class MonitoringScheduler:
                                     (daily_prefix + "%",)).fetchone()[0]
             history_count = c.execute("SELECT COUNT(*) FROM monitoring_runs WHERE schedule_key LIKE ?",
                                       (daily_prefix + "history:%",)).fetchone()[0]
-            if history_cursor and total_count < self.windows_per_day:
+            if (history_cursor is not None or recent_has_backlog) and total_count < self.windows_per_day:
                 page_key = f"{daily_prefix}history:{history_count}"
                 c.execute("INSERT OR IGNORE INTO monitoring_runs(run_id,schedule_key,status,cursor_json,created_at,updated_at) VALUES(?,?,?,?,?,?)",
                           (secrets.token_hex(16), page_key, "pending", history_cursor, stamp, stamp))
