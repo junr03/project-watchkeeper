@@ -10,7 +10,7 @@
 
 **Status:** ready-for-agent
 
-**Execution:** Implemented; coordinator independently verified 33 integrated tests and pinned-runtime config/tool/auth-failure checks. Actual subscription/model evaluation remains unverified.
+**Execution:** Implemented; coordinator independently verified 93 final integrated tests and built-container config/tool/auth-failure/containment checks. Actual subscription/model evaluation remains unverified.
 
 **Branch:** `jnr/03-restricted-review`; review stack includes tickets 02 and 04 for source coverage and deterministic decision enforcement.
 
@@ -25,8 +25,8 @@
 ## Acceptance criteria
 
 - [ ] Reviewer inference uses a supported account/subscription login; source-account credentials are not supplied to it.
-- [ ] The reviewer can only read permitted observations and submit proposals; shell/browser execution, source replies, delegation, self-reconfiguration, and arbitrary recipient selection are unavailable.
-- [ ] Restrictions cover Gateway-side plugins/MCP as well as tool execution; no container-runtime socket or host-wide mount is exposed.
+- [x] The reviewer can only read permitted observations and submit proposals; shell/browser execution, source replies, delegation, self-reconfiguration, and arbitrary recipient selection are unavailable.
+- [x] Restrictions cover Gateway-side plugins/MCP as well as tool execution; no container-runtime socket or host-wide mount is exposed.
 - [x] An explicit unanswered input request is eligible for the next digest; inferred attention requires the configurable three-day default and a concrete evidence-supported user action.
 - [x] Active agent work, known external dependencies, and source outages do not become unsupported claims that the project is waiting on the user.
 - [x] Grouping requires strong evidence; uncertain grouping/completion is visible as a proposal rather than emailed as fact.
@@ -45,4 +45,5 @@ See `docs/evidence-03.md`: 33 tests independently passed, including the real
 worker/broker/application boundary with controlled model output. Pinned-image
 config validity, empty tool set and no-login refusal were separately executed.
 Account-dependent inference and judgment remain unverified; container boundary
-checks continue in ticket 07. No API-key fallback or account activation.
+checks independently passed in [ticket 07 evidence](../../../docs/evidence-07.md).
+No API-key fallback or account activation.

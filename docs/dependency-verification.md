@@ -9,7 +9,7 @@ compatibility with an owner's Mac installation or semantic reviewer quality.
 | --- | --- | --- |
 | Codex app-server | CLI 0.162.1 | Generated the installed binary's JSON protocol schemas; inspected thread list/read/turn pagination contracts |
 | OpenClaw | 2026.10.5; `ghcr.io/openclaw/openclaw@sha256:f40d1e66fd14d8c5b49c832f4100f83b53fdc01f5108f7db11de38fd0ee6dbe5` | Executed version, config validation, and actual tool construction in the pinned Linux image |
-| Python | 3.12 slim; `python@sha256:cb33f7f771ecec2ef1225cf39b159591a040391bd73e4c01f00fdfc4c47611d2` | First vertical slice's two HTTP acceptance tests passed as uid 65534, read-only root/source, no network, writable tmpfs |
+| Python | 3.12 slim; `python@sha256:cb33f7f771ecec2ef1225cf39b159591a040391bd73e4c01f00fdfc4c47611d2` | First vertical slice and the 93-test final integrated suite passed with read-only root/source, no network, non-root UID and writable tmpfs |
 
 The OpenClaw image reports `OpenClaw 2026.10.5 (1b58cb9)` and Node 24.21.0.
 The image index contains Linux amd64 and arm64 manifests. Execution here was
@@ -39,10 +39,11 @@ denied, MCP servers are empty, and the model runtime is explicitly `openclaw`.
 The current canonical provider is `openai`; the legacy `openai-codex` name
 must not be used to trigger automatic native-harness installation.
 
-Configuration and tool-factory checks do not prove containment of a deployed
-container, successful OAuth renewal, provider endpoint compatibility, model
-availability, or useful semantic judgments. Those are separate checks and
-activation gates in the integration evidence and deployment handoff.
+Configuration and tool-factory checks alone do not prove containment. The
+coordinator separately verified the built container boundary in
+[portable milestone evidence](evidence-07.md). Successful OAuth renewal,
+provider endpoint compatibility, model availability and useful semantic
+judgments remain separate activation gates.
 
 ## Codex protocol findings
 
@@ -51,8 +52,10 @@ The installed binary's generated schemas confirm `thread/list` supports
 and separate archived/unarchived scans. Omitting source kinds excludes some
 session origins. The collector uses `useStateDbOnly: false` solely in a
 disposable credential-free transcript mirror, allowing metadata reconstruction
-without writing to the source installation. It never copies source SQLite
-databases or follows their absolute rollout paths.
+without writing to the source installation. It never copies general source state, account databases or configuration,
+and does not follow their absolute rollout paths. Modern history requires an
+optional standalone `thread_history_1.sqlite` projection, validated against the
+pinned closed schema and selected transcript IDs before and after copying.
 `thread/read` does not resume a thread. `thread/turns/list` with `itemsView:
 full` supplies turn items with continuation; a reader must not assume every
 historical item supports a separate item-list call.
@@ -60,8 +63,11 @@ historical item supports a separate item-list call.
 Thread `updatedAt` and turn `startedAt`/`completedAt` values are Unix seconds;
 item-entry `startedAtMs`/`completedAtMs` values are milliseconds. A `notLoaded`
 execution status means unknown activity, not idle. A controlled legacy binary run read both user and assistant items, reached
-the authenticated page and captured a digest. Mac, modern rollout, nonempty
-archived history and multipage binary compatibility remain unverified.
+the authenticated page and captured a digest. A local fake Responses API additionally generated modern synthetic sessions.
+The coordinator independently verified two-page active listing, a nonempty
+archived listing, two-turn continuation and two item pages against the actual
+binary. Modern collector observations also reached HTTP intake, authenticated
+state and captured mail. Mac and owner-history compatibility remain unverified.
 
 No source account was connected and no private source conversation was read
 for these dependency checks.
