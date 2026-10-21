@@ -6,8 +6,8 @@ This guide describes the intended implementation, not a tested installation.
 
 ## First demonstration
 
-Create a synthetic unfinished project, with source-shaped OpenCode and Codex
-fixtures representing a server session and a Mac session. It has a concrete
+Create a synthetic unfinished project, with multiple source-shaped Codex
+thread fixtures representing sessions on the Mac. It has a concrete
 next action for its user even though the last agent turn finished normally.
 This is a fabricated test scenario, not an existing project of the owner.
 
@@ -22,8 +22,9 @@ tests; exercise the real intake, register, policy, and notification logic.
 Use controlled model responses for deterministic policy tests and evaluate
 the actual reviewer separately on the synthetic cases. Stubs do not count as
 proof of source-reader compatibility or semantic accuracy. The production
-collectors remain part of the first slice and need separate compatibility
-checks against pinned source versions and controlled test sessions.
+Codex collector remains part of the first slice and needs separate
+compatibility checks against a pinned source version and controlled test
+sessions. OpenCode, other providers, and remote-server collection come later.
 
 All implementation and fixtures live in project-watchkeeper. Real account
 connections, recipient delivery, and Electricpeak activation are separate
@@ -96,8 +97,9 @@ A server collector operates independently of the laptop. Connectivity gaps
 must not advance an inferred no-progress claim as though new evidence had
 been collected.
 
-Start with OpenCode's local server/session interfaces and Codex's documented
-thread interfaces where available. Match each reader to the installed
+Start with Codex's documented thread interfaces where available. Add
+OpenCode's local server/session interfaces during later source expansion.
+Match each reader to the installed
 version and real session source. If a reliable deep link is unavailable,
 display an honest source/thread locator rather than fabricate a URL.
 
@@ -166,7 +168,7 @@ model API keys must not be a prerequisite.
    Check actual reader compatibility using controlled test sessions; validate
    subscription-authenticated review when an explicitly configured test
    login is available. Report untested capabilities as untested.
-2. **Complete the first slice.** Build both initial collectors, durable intake
+2. **Complete the first slice.** Build the Codex collector, durable intake
    and project state, restricted review, the control page, and digest delivery.
    Include the complete acceptance checks below before claiming the slice.
 3. **Package and hand off.** Produce portable container artifacts,
@@ -174,7 +176,7 @@ model API keys must not be a prerequisite.
    in this repository. Document runtime requirements and operator checks.
    Electricpeak repository changes and production activation are separate
    work, outside this implementation plan.
-4. **Expand one source at a time.** Add Claude, ChatGPT web, and Meta Muse
+4. **Expand one source at a time.** Add OpenCode, Claude, ChatGPT web, and Meta Muse
    readers only after the first demonstration. Each adapter must pass the
    same completeness, permission, and recovery contract.
 
@@ -188,7 +190,7 @@ during ticket breakdown; this spec publication does not generate tickets.
 | Scenario | Required result |
 | --- | --- |
 | Agent ends normally; outcome unfinished | Evidence-supported user next action is discoverable |
-| Work spans both initial sources | One justified project or an explicit uncertain grouping proposal |
+| Work spans multiple Codex threads | One justified project or an explicit uncertain grouping proposal |
 | Explicit unanswered request | Eligible for the next digest |
 | Inferred stalled work | Requires configured elapsed time, usable evidence, and a concrete user action |
 | Agent working / external dependency | Not reported as waiting on the user |

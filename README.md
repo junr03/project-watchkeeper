@@ -6,6 +6,8 @@ and surfaces the next action that needs your attention.
 This repository currently contains a ready-for-agent specification and
 supporting implementation guidance. There is no runnable service yet.
 
+The first slice monitors Codex threads only. Other sources are later expansion.
+
 - [Feature specification](.scratch/project-watchkeeper/spec.md)
 - [Implementation guide and acceptance checks](docs/implementation.md)
 - [Electricpeak deployment handoff](docs/deployment-electricpeak.md)

@@ -4,6 +4,10 @@ These references informed the design. Documented capabilities and inspected
 community code are candidate integration seams, not evidence that an
 end-to-end Watchkeeper installation has been tested.
 
+The first slice uses Codex threads only. OpenCode, Claude, ChatGPT web, and
+Meta Muse are references for later source expansion, not dependencies of the
+first demonstration.
+
 | Component | Evidence | Implementation limit |
 | --- | --- | --- |
 | OpenClaw review | [Heartbeat](https://docs.openclaw.ai/gateway/heartbeat), [subscription OAuth](https://docs.openclaw.ai/concepts/oauth) | Validate bounded review and login renewal against a pinned release |

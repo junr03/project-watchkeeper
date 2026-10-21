@@ -9,17 +9,19 @@ Status: ready-for-agent
   and delivers a daily email digest only when there is new actionable
   information. It provides persistent user controls, source coverage and
   collection notices, configurable retention, and account/subscription access
-  without requiring model API keys. Start with server OpenCode and Mac Codex;
-  add ChatGPT web, Claude, and Meta Muse after the first complete demonstration.
+  without requiring model API keys. Start with Codex threads on the Mac only;
+  add OpenCode, ChatGPT web, Claude, and Meta Muse after the first complete
+  demonstration.
   All implementation stays in project-watchkeeper.
 - **First demo:** Create a fabricated unfinished project represented by
-  OpenCode-shaped and Codex-shaped fixtures. Import observations, identify the
+  multiple Codex-thread fixtures. Import observations, identify the
   outcome and next action, capture a digest in a local email sink, and persist
   a user decision through the authenticated control page. Simulate Mac
   sleep/wake and repeat review to demonstrate retained visibility and silence
   when nothing actionable changes. No existing user project is required.
-  Production collectors are part of the slice, but fixture results do not
-  prove their compatibility with live sources.
+  The production Codex collector is part of the slice, but fixture results
+  do not prove its compatibility with live Codex threads. Cross-provider and
+  remote-server collection are later expansion, not first-slice requirements.
 - **Seam reuse:** The repository currently contains documentation, with no
   executable code or existing test harness. Introduce one primary application
   acceptance boundary: observations and explicit user actions enter the
@@ -192,12 +194,12 @@ operator to deploy it behind Electricpeak's existing Envoy pattern.
 - **Prior art:** There are no executable tests in this documentation-only
   repository. The already-reviewed synthetic demo and acceptance scenarios
   provide the behavioral starting point; the harness must be built.
-- **Controlled external inputs:** Use source-shaped OpenCode/Codex fixtures,
+- **Controlled external inputs:** Use source-shaped Codex-thread fixtures,
   simulated time and availability, controlled reviewer responses, and a local
   email sink. Exercise real intake, register, user-decision enforcement,
   retention, and notification logic. Use synthetic material in public fixtures.
 - **Outcome checks:** Cover unfinished work after a normal agent response,
-  cross-source grouping, uncertain evidence, explicit versus inferred
+  grouping across Codex threads, uncertain evidence, explicit versus inferred
   attention thresholds, active work, and external dependencies. Verify no
   duplicate digest after repeated unchanged reviews.
 - **User controls:** Verify persistence and precedence across subsequent
@@ -235,8 +237,8 @@ operator to deploy it behind Electricpeak's existing Envoy pattern.
 - Requiring model API keys or silently switching billing/authentication modes.
 - Treating timestamps, source outages, agent turn completion, or speculative
   findings as proof that a project is waiting on the user.
-- Implementing every consumer-source adapter before demonstrating the first
-  OpenCode/Codex slice.
+- OpenCode, other providers, and remote-server collection in the first slice.
+  These remain later expansion after the Codex-only demonstration.
 - Automatically creating implementation tickets or assigning a fixed PR count
   as part of this spec publication.
 
