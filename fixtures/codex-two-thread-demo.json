@@ -1,0 +1,31 @@
+{
+  "source_id": "codex-demo-installation",
+  "cursor": "demo-cursor-001",
+  "available": true,
+  "observations": [
+    {
+      "thread_id": "thread-plan",
+      "message_id": "msg-user-goal",
+      "revision": "1",
+      "source_timestamp": "2026-10-20T16:00:00Z",
+      "locator": "Synthetic Codex thread thread-plan, message msg-user-goal",
+      "text": "I want to publish a small garden guide with three tested planting plans."
+    },
+    {
+      "thread_id": "thread-plan",
+      "message_id": "msg-agent-finish",
+      "revision": "1",
+      "source_timestamp": "2026-10-20T16:30:00Z",
+      "locator": "Synthetic Codex thread thread-plan, message msg-agent-finish",
+      "text": "The draft outline is ready. I have not tested the planting plans."
+    },
+    {
+      "thread_id": "thread-research",
+      "message_id": "msg-next-step",
+      "revision": "1",
+      "source_timestamp": "2026-10-20T17:00:00Z",
+      "locator": "Synthetic Codex thread thread-research, message msg-next-step",
+      "text": "The guide still needs a local nursery to confirm the planting dates."
+    }
+  ]
+}

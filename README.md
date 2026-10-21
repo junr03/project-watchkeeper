@@ -3,10 +3,26 @@
 A self-hosted monitor that tracks unfinished projects across AI conversations
 and surfaces the next action that needs your attention.
 
-This repository currently contains a ready-for-agent specification and
-supporting implementation guidance. There is no runnable service yet.
+The first synthetic slice accepts Codex-shaped observations, stores one
+evidence-backed project, renders an authenticated control page, and captures a
+deduplicated digest in a local `.eml` sink. It does not connect to live Codex
+threads or send real email. Other sources and live reader compatibility are
+later work.
 
-The first slice monitors Codex threads only. Other sources are later expansion.
+Run the synthetic flow with Python 3.12 or newer:
+
+```sh
+python3 -m watchkeeper.demo
+```
+
+Run the application acceptance suite with:
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+See the [application contract](docs/application-contract.md) for the HTTP
+boundaries, credentials, request shapes, and production service settings.
 
 - [Feature specification](.scratch/project-watchkeeper/spec.md)
 - [Codex-only implementation tickets](.scratch/project-watchkeeper/README.md)
