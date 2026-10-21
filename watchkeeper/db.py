@@ -7,7 +7,7 @@ from pathlib import Path
 from contextlib import contextmanager
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 
 class Database:
@@ -36,9 +36,8 @@ class Database:
 
     def _initialize(self):
         with self.connect() as c:
-            c.execute("BEGIN IMMEDIATE")
             version = c.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, SCHEMA_VERSION):
+            if version not in (0, 1, 2, SCHEMA_VERSION):
                 raise RuntimeError(f"unsupported database schema version {version}")
             if version == 0:
                 c.executescript("""
@@ -83,7 +82,67 @@ class Database:
                     PRAGMA user_version=1;
                 """)
                 c.commit()
-            else:
+                version = 1
+            if version == 1:
+                c.execute("BEGIN IMMEDIATE")
+                c.execute("ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+                c.execute("ALTER TABLE projects ADD COLUMN assessment_kind TEXT NOT NULL DEFAULT 'attention'")
+                c.execute("ALTER TABLE projects ADD COLUMN eligible INTEGER NOT NULL DEFAULT 1")
+                c.execute("ALTER TABLE projects ADD COLUMN eligibility_reason TEXT NOT NULL DEFAULT ''")
+                c.execute("ALTER TABLE projects ADD COLUMN assessed_at TEXT")
+                c.execute("ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'explicit_request'")
+                c.execute("ALTER TABLE projects ADD COLUMN grouping_confidence TEXT NOT NULL DEFAULT 'strong'")
+                c.execute("ALTER TABLE projects ADD COLUMN last_progress_at TEXT")
+                c.execute("""CREATE TABLE excluded_sources (
+                        source_id TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL
+                    )""")
+                c.execute("""CREATE TABLE excluded_threads (
+                        source_id TEXT NOT NULL,
+                        thread_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY(source_id, thread_id)
+                    )""")
+                c.execute("""CREATE TABLE thread_ownership (
+                        source_id TEXT NOT NULL,
+                        thread_id TEXT NOT NULL,
+                        project_id TEXT NOT NULL,
+                        assigned_at TEXT NOT NULL,
+                        PRIMARY KEY(source_id, thread_id)
+                    )""")
+                c.execute("CREATE INDEX thread_ownership_project ON thread_ownership(project_id)")
+                c.execute("""CREATE TABLE review_proposals (
+                        proposal_id TEXT PRIMARY KEY,
+                        requested_project_id TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        next_action TEXT NOT NULL,
+                        reasoning TEXT NOT NULL,
+                        evidence_json TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        grouping_confidence TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )""")
+                c.execute("PRAGMA user_version=2")
+                c.commit()
+                version = 2
+            if version == 2:
+                c.execute("BEGIN IMMEDIATE")
+                c.execute("""CREATE TABLE project_threads (
+                    source_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    assigned_at TEXT NOT NULL,
+                    PRIMARY KEY(source_id,thread_id,project_id)
+                )""")
+                c.execute("CREATE INDEX project_threads_project ON project_threads(project_id)")
+                # Existing projects already carry their captured evidence. Treat
+                # those links as discovered associations, never as user locks.
+                for project in c.execute("SELECT project_id,evidence_json,updated_at FROM projects").fetchall():
+                    for evidence in json.loads(project["evidence_json"]):
+                        c.execute("INSERT OR IGNORE INTO project_threads VALUES(?,?,?,?)",
+                                  (evidence["source_id"], evidence["thread_id"], project["project_id"], project["updated_at"]))
+                c.execute("PRAGMA user_version=3")
                 c.commit()
 
     @staticmethod
