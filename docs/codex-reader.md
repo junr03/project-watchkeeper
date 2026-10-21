@@ -10,19 +10,19 @@ directory, an intake URL, a token file, and a private cursor file.
 
 | Capability | Status | Behavior and limit |
 | --- | --- | --- |
-| Thread listing | Controlled Linux legacy fixture measured; modern rollout listing unverified | `thread/list`, ordered by `updated_at` descending, `useStateDbOnly: false` only inside a disposable transcript mirror |
+| Thread listing | Controlled Linux legacy and modern synthetic session measured | `thread/list`, ordered by `updated_at` descending, `useStateDbOnly: false`, and `modelProviders: []` (all providers) only inside a disposable selected-history mirror |
 | Source kinds | Schema supported; live compatibility untested | Always supplies all inspected v2 kinds: `cli`, `vscode`, `exec`, `appServer`, `subAgent`, `subAgentReview`, `subAgentCompact`, `subAgentThreadSpawn`, `subAgentOther`, and `unknown` |
 | Active history | Schema supported; live compatibility untested | `archived: false` scan |
 | Archived history | Schema supported; live compatibility untested | Separate `archived: true` scan; coverage says complete only after it finishes |
 | Thread pagination | Implemented; multi-page binary compatibility unverified | Continues from opaque `nextCursor`; cursor advances only after the corresponding intake response acknowledges persistence |
-| Message pagination | Controlled single-page legacy fixture measured; modern multi-page compatibility unverified | Requests `thread/turns/list` with `itemsView: full`; turns and their available items continue by cursor. Large pages are split into intake batches below 900 KB; intermediate checkpoints stay at the page start until every chunk is acknowledged. A missing/non-full view leaves per-thread coverage partial |
+| Message pagination | Controlled legacy fixture and modern synthetic projection measured; modern multi-page compatibility unverified | Requests `thread/turns/list` with `itemsView: full`; turns and their available items continue by cursor. Large pages are split into intake batches below 900 KB; intermediate checkpoints stay at the page start until every chunk is acknowledged. A missing/non-full view or an empty turn result for a listed thread leaves coverage partial |
 | Revisions and replay | Supported | Message ID is stable within source and thread; the revision combines the source timestamp and a content digest. Identical revisions preserve capture time |
 | Current execution activity | Explicit thread status only | `active` and `idle` are recorded when Codex returns those exact status types. `notLoaded`, absent, or unrecognized status stays `unknown`; a completed turn does not imply idle |
 | Deep links | Unsupported | The UI receives a plain Codex thread/message locator, never an invented URL |
 | Attachments and non-text items | Partial | User and agent text items are retained. Other item types are not represented as messages; text beyond the intake limit marks thread coverage partial |
 | Codex Mac compatibility | Untested | The protocol schema is pinned and fixture-tested on Linux. A controlled macOS Codex 0.162.1 session is still required before claiming live compatibility |
 
-A controlled Linux run with Codex 0.162.1 successfully initialized, listed, read, and paginated a legacy synthetic transcript; its returned turn contained direct full-view `userMessage` and `agentMessage` items. Both reached the authenticated page and captured digest through the actual collector and HTTP intake with a controlled review proposal. The fixture did not exercise nonempty archived traversal, modern paginated rollout files, or multi-page turn cursors. This measures a narrow protocol path, not full compatibility.
+A controlled Linux run with Codex 0.162.1 successfully initialized, listed, read, and paginated a legacy synthetic transcript; its returned turn contained direct full-view `userMessage` and `agentMessage` items. A separate synthetic modern session created through a local fake Responses API showed that `thread/list` needs `modelProviders: []`, and that modern turn contents are projected into `thread_history_1.sqlite`. Copying only that database with SQLite's backup API into the disposable app-server home returned the full user and assistant items with timestamps. The modern path was also exercised through `CodexCollector`, actual HTTP intake, a controlled proposal, authenticated HTML state, and captured digest; two synthetic observations reached complete coverage. These checks used generated content and no account. Nonempty archived traversal, modern paginated rollout files, multi-page turn cursors, and Codex Mac compatibility remain unverified. The measurements establish a narrow Linux protocol path, not full compatibility.
 
 The app-server request allowlist is `initialize`, `initialized`, `thread/list`,
 `thread/read`, `thread/turns/list`, and `thread/items/list`. The current reader
@@ -33,18 +33,24 @@ ignoring interleaved server notifications. Unexpected transport errors produce a
 (`authentication`, `quota`, `unsupported`, `unavailable`, or `protocol`) and
 preserve the last acknowledged checkpoint.
 
-## Isolated transcript mirror
+## Isolated selected-history mirror
 
 The app-server can update local metadata while enumerating history, so it runs
 against a temporary copy, never the supplied directory itself. Provision a
 dedicated mirror from only the transcript JSONL files you explicitly select.
 Do not use the regular Codex home as `--source-dir`. Do not place a Codex
-configuration, SQLite state database, login/session files, plugins, tokens,
-symlinks, or other private material in the mirror. The reader rejects files and
-directories outside this allowlist, copies only `sessions/` and
-`archived_sessions/` JSONL transcript files, and uses a fresh temporary
-`CODEX_HOME` with credentials and proxy variables removed. Its list request
-allows the disposable app-server to rebuild its local metadata from the mirror.
+configuration, `state_5.sqlite`, login/session files, plugins, tokens, symlinks,
+or other private material in the mirror. For modern thread history, you may
+explicitly provision exactly one `thread_history_1.sqlite` snapshot beside the
+marker. The reader accepts only the pinned 0.162.1 projection schema, rejects
+unknown tables, views, indexes, triggers, migration versions, sidecars, and
+thread IDs not present in selected JSONL transcripts, then copies that single
+database into a fresh temporary `CODEX_HOME`. Never copy the source database
+file and its WAL files directly; create a consistent standalone snapshot with
+SQLite's backup API. The reader also removes account and proxy variables and
+uses an otherwise clean temporary home. It does not select providers by
+default; `modelProviders: []` explicitly means all providers in this app-server
+version.
 
 Create `.watchkeeper-reader-state` containing this exact public-safe marker:
 
@@ -55,8 +61,44 @@ Create `.watchkeeper-reader-state` containing this exact public-safe marker:
 The marker records the operator's assertion about that directory; the
 collector still verifies the directory allowlist and rejects symlinks. Keep
 active transcript JSONL under `sessions/` and archived transcript JSONL under
-`archived_sessions/` so the app-server can see each collection scope. A
-mirror can contain private transcripts, so keep it outside the repository and
+`archived_sessions/` so the app-server can see each collection scope. If you
+need modern turns, first choose those same transcript files, then back up only
+the projection database into the mirror. For example, after creating the
+mirror directories and copying the explicitly selected transcripts:
+
+```sh
+python3 - <<'PY'
+import sqlite3
+from pathlib import Path
+
+source = Path("/private/codex/thread_history_1.sqlite")
+destination = Path("/private/watchkeeper/codex-mirror/thread_history_1.sqlite")
+read_only = sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)
+try:
+    with sqlite3.connect(destination) as snapshot:
+        read_only.backup(snapshot)
+finally:
+    read_only.close()
+PY
+```
+
+The source database is opened read-only. Keep the snapshot outside the
+repository with restricted permissions. The reader refuses a sidecar or a
+projection thread whose transcript was not selected; missing or empty modern
+history results remain partial rather than being treated as complete. An
+empty history projection is optional for older mirrors, but it may not support
+modern turn reads.
+
+The optional actual-binary check uses a temporary home and a local fake
+Responses API; it does not read account files or contact a hosted model:
+
+```sh
+python tests/codex-modern-compat.py --codex-binary /path/to/codex
+```
+
+It emits only pass/fail and item counts, then deletes its temporary files.
+
+A mirror can contain private transcripts, so keep it outside the repository and
 restrict its permissions. The intake token is kept separately in a file with
 no group or other access. The cursor file is written atomically with mode
 0600 only after an HTTP intake acknowledgement. App-server output and source

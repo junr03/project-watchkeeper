@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import closing
 import hashlib
 import argparse
 import json
@@ -14,6 +15,7 @@ import queue
 import time
 import tempfile
 import shutil
+import sqlite3
 import re
 import urllib.error
 import urllib.request
@@ -25,6 +27,150 @@ SOURCE_KINDS = ["cli", "vscode", "exec", "appServer", "subAgent", "subAgentRevie
 READ_METHODS = frozenset({"thread/list", "thread/read", "thread/turns/list", "thread/items/list"})
 _ALLOWED_METHODS = READ_METHODS | {"initialize", "initialized"}
 MAX_INTAKE_BATCH_BYTES = 900_000
+MAX_HISTORY_PROJECTION_BYTES = 512 * 1024 * 1024
+
+# Codex 0.162.1's read-only thread history projection. This is deliberately a
+# closed schema allowlist: a copied account/state database is not acceptable.
+_HISTORY_COLUMNS = {
+    "_sqlx_migrations": ("version", "description", "installed_on", "success", "checksum", "execution_time"),
+    "thread_history_projection_state": ("thread_id", "next_rollout_byte_offset", "next_rollout_ordinal"),
+    "thread_items": ("thread_id", "turn_id", "item_id", "rollout_ordinal", "created_at_ms", "item_json",
+                     "item_type", "updated_at_ordinal", "started_at_ms", "completed_at_ms"),
+    "thread_realtime_items": ("thread_id", "item_id", "rollout_ordinal", "created_at_ms", "item_type", "item_json"),
+    "thread_turns": ("thread_id", "turn_id", "rollout_ordinal", "status", "error_json", "started_at",
+                     "completed_at", "duration_ms", "first_user_item_id", "final_agent_item_id",
+                     "rollout_byte_offset", "rollout_end_ordinal", "rollout_end_byte_offset", "root_turn_id"),
+}
+_HISTORY_COLUMN_SHAPE = {
+    "_sqlx_migrations": (("version", "BIGINT", 0, 1), ("description", "TEXT", 1, 0),
+                         ("installed_on", "TIMESTAMP", 1, 0), ("success", "BOOLEAN", 1, 0),
+                         ("checksum", "BLOB", 1, 0), ("execution_time", "BIGINT", 1, 0)),
+    "thread_history_projection_state": (("thread_id", "TEXT", 0, 1), ("next_rollout_byte_offset", "INTEGER", 1, 0),
+                                        ("next_rollout_ordinal", "INTEGER", 1, 0)),
+    "thread_items": (("thread_id", "TEXT", 1, 1), ("turn_id", "TEXT", 1, 2), ("item_id", "TEXT", 1, 3),
+                     ("rollout_ordinal", "INTEGER", 1, 0), ("created_at_ms", "INTEGER", 1, 0),
+                     ("item_json", "TEXT", 1, 0), ("item_type", "TEXT", 1, 0),
+                     ("updated_at_ordinal", "INTEGER", 1, 0), ("started_at_ms", "INTEGER", 0, 0),
+                     ("completed_at_ms", "INTEGER", 0, 0)),
+    "thread_realtime_items": (("thread_id", "TEXT", 1, 1), ("item_id", "TEXT", 1, 2),
+                              ("rollout_ordinal", "INTEGER", 1, 0), ("created_at_ms", "INTEGER", 1, 0),
+                              ("item_type", "TEXT", 1, 0), ("item_json", "TEXT", 1, 0)),
+    "thread_turns": (("thread_id", "TEXT", 1, 1), ("turn_id", "TEXT", 1, 2),
+                     ("rollout_ordinal", "INTEGER", 1, 0), ("status", "TEXT", 1, 0),
+                     ("error_json", "TEXT", 0, 0), ("started_at", "INTEGER", 0, 0),
+                     ("completed_at", "INTEGER", 0, 0), ("duration_ms", "INTEGER", 0, 0),
+                     ("first_user_item_id", "TEXT", 0, 0), ("final_agent_item_id", "TEXT", 0, 0),
+                     ("rollout_byte_offset", "INTEGER", 0, 0), ("rollout_end_ordinal", "INTEGER", 0, 0),
+                     ("rollout_end_byte_offset", "INTEGER", 0, 0), ("root_turn_id", "TEXT", 0, 0)),
+}
+_HISTORY_INDEXES = frozenset({
+    "idx_thread_items_by_turn_page", "idx_thread_items_by_turn_updated_page", "idx_thread_items_page",
+    "idx_thread_items_updated_page", "idx_thread_items_user_messages", "idx_thread_realtime_items_boundary",
+    "idx_thread_realtime_items_page", "idx_thread_turns_end_page", "idx_thread_turns_page",
+})
+_HISTORY_INDEX_SQL = {
+    "idx_thread_items_by_turn_page": "CREATE INDEX idx_thread_items_by_turn_page ON thread_items(thread_id, turn_id, rollout_ordinal)",
+    "idx_thread_items_by_turn_updated_page": "CREATE INDEX idx_thread_items_by_turn_updated_page ON thread_items(thread_id, turn_id, updated_at_ordinal)",
+    "idx_thread_items_page": "CREATE UNIQUE INDEX idx_thread_items_page ON thread_items(thread_id, rollout_ordinal)",
+    "idx_thread_items_updated_page": "CREATE INDEX idx_thread_items_updated_page ON thread_items(thread_id, updated_at_ordinal)",
+    "idx_thread_items_user_messages": "CREATE INDEX idx_thread_items_user_messages ON thread_items(thread_id, rollout_ordinal) WHERE item_type = 'userMessage'",
+    "idx_thread_realtime_items_boundary": "CREATE INDEX idx_thread_realtime_items_boundary ON thread_realtime_items(thread_id, rollout_ordinal) WHERE item_type IN ('realtime_session_started', 'realtime_session_closed')",
+    "idx_thread_realtime_items_page": "CREATE UNIQUE INDEX idx_thread_realtime_items_page ON thread_realtime_items(thread_id, rollout_ordinal)",
+    "idx_thread_turns_end_page": "CREATE INDEX idx_thread_turns_end_page ON thread_turns(thread_id, rollout_end_ordinal, turn_id) WHERE rollout_end_ordinal IS NOT NULL",
+    "idx_thread_turns_page": "CREATE UNIQUE INDEX idx_thread_turns_page ON thread_turns(thread_id, rollout_ordinal)",
+}
+_HISTORY_TRIGGER = "thread_realtime_items_projection_cleanup"
+_HISTORY_MIGRATIONS = (
+    (1, "thread history"), (2, "thread items item type"), (3, "turn rollout positions"),
+    (4, "thread items updated at ordinal"), (5, "thread realtime items"), (6, "thread turn ends"),
+    (7, "thread item lifecycle timestamps"), (8, "thread turn root"),
+)
+
+
+def _transcript_thread_ids(source_location: Path) -> set[str]:
+    """Read only session IDs from the explicitly selected mirror transcripts."""
+    ids = set()
+    for dirname in ("sessions", "archived_sessions"):
+        root = source_location / dirname
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.jsonl"):
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("isolated reader history cannot contain symlinks or special files")
+            with path.open("r", encoding="utf-8") as stream:
+                for line in stream:
+                    if len(line) > 2_000_000:
+                        raise ValueError("isolated reader transcript record exceeds the safe size limit")
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise ValueError("isolated reader transcript contains invalid JSON") from exc
+                    if isinstance(record, dict) and record.get("type") == "session_meta":
+                        payload = record.get("payload")
+                        if isinstance(payload, dict):
+                            thread_id = payload.get("id", payload.get("session_id"))
+                            if isinstance(thread_id, str) and thread_id:
+                                ids.add(thread_id)
+                                break
+    return ids
+
+
+def _validate_history_projection(path: Path, selected_thread_ids: set[str]) -> None:
+    """Reject anything except the pinned 0.162.1 history projection snapshot."""
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Codex history projection must be a regular non-symlink file")
+    if path.stat().st_size > MAX_HISTORY_PROJECTION_BYTES:
+        raise ValueError("Codex history projection exceeds the safe size limit")
+    if any(Path(str(path) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")):
+        raise ValueError("Codex history projection must be a consistent standalone SQLite backup")
+    uri = path.resolve().as_uri() + "?mode=ro&immutable=1"
+    try:
+        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("PRAGMA trusted_schema=OFF")
+            if db.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                raise ValueError("Codex history projection failed SQLite integrity validation")
+            objects = db.execute("SELECT type, name, tbl_name, sql FROM sqlite_master "
+                                 "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").fetchall()
+            tables = {name for kind, name, _, _ in objects if kind == "table"}
+            expected_tables = set(_HISTORY_COLUMNS)
+            if tables != expected_tables:
+                raise ValueError("Codex history projection has an unsupported table set")
+            if any(kind not in {"table", "index", "trigger"} for kind, _, _, _ in objects):
+                raise ValueError("Codex history projection contains unsupported SQLite objects")
+            index_sql = {name: " ".join((sql or "").split())
+                         for kind, name, _, sql in objects if kind == "index"}
+            indexes = set(index_sql)
+            if indexes != _HISTORY_INDEXES:
+                raise ValueError("Codex history projection has an unsupported index set")
+            if index_sql != _HISTORY_INDEX_SQL:
+                raise ValueError("Codex history projection has unsupported index definitions")
+            triggers = [(name, sql) for kind, name, _, sql in objects if kind == "trigger"]
+            if len(triggers) != 1 or triggers[0][0] != _HISTORY_TRIGGER:
+                raise ValueError("Codex history projection has unsupported triggers")
+            trigger_sql = " ".join((triggers[0][1] or "").lower().split())
+            expected_trigger = ("create trigger thread_realtime_items_projection_cleanup after delete on "
+                                "thread_history_projection_state begin delete from thread_realtime_items "
+                                "where thread_id = old.thread_id; end")
+            if trigger_sql != expected_trigger:
+                raise ValueError("Codex history projection cleanup trigger is unsupported")
+            for table, expected_columns in _HISTORY_COLUMNS.items():
+                info = db.execute(f'PRAGMA table_info("{table}")').fetchall()
+                shape = tuple((row[1], row[2].upper(), row[3], row[5]) for row in info)
+                if tuple(row[1] for row in info) != expected_columns or shape != _HISTORY_COLUMN_SHAPE[table]:
+                    raise ValueError(f"Codex history projection has unsupported schema in {table}")
+            migrations = db.execute("SELECT version, description, success FROM _sqlx_migrations ORDER BY version").fetchall()
+            if migrations != [(version, description, 1) for version, description in _HISTORY_MIGRATIONS]:
+                raise ValueError("Codex history projection migration version is unsupported")
+            thread_ids = set()
+            for table in ("thread_history_projection_state", "thread_items", "thread_realtime_items", "thread_turns"):
+                thread_ids.update(row[0] for row in db.execute(f'SELECT DISTINCT thread_id FROM "{table}"'))
+            if any(not isinstance(thread_id, str) or not thread_id for thread_id in thread_ids):
+                raise ValueError("Codex history projection contains invalid thread IDs")
+            if not thread_ids.issubset(selected_thread_ids):
+                raise ValueError("Codex history projection contains threads outside the selected transcript mirror")
+    except sqlite3.Error as exc:
+        raise ValueError("Codex history projection is not a supported SQLite snapshot") from exc
 
 
 class ReaderFailure(RuntimeError):
@@ -70,13 +216,14 @@ class JsonLineAppServer:
             raise ValueError("isolated reader marker must be valid JSON") from exc
         if attestation != {"format": "watchkeeper-codex-reader-state-v1", "credentials_excluded": True,
                            "transcripts_only": True}:
-            raise ValueError("isolated reader marker does not attest credential-free transcript-only state")
+            raise ValueError("isolated reader marker does not attest credential-free selected history state")
+        projection = source_location / "thread_history_1.sqlite"
         for entry in source_location.iterdir():
             if entry.is_symlink():
                 raise ValueError("isolated reader state cannot contain symlinks")
             if entry.name == ".watchkeeper-reader-state":
                 continue
-            if entry.is_file():
+            if entry.is_file() and entry.name not in {".watchkeeper-reader-state", "thread_history_1.sqlite"}:
                 raise ValueError("isolated reader state contains an unapproved file")
             if entry.is_dir() and entry.name not in {"sessions", "archived_sessions"}:
                 raise ValueError("isolated reader state contains an unapproved directory")
@@ -90,6 +237,8 @@ class JsonLineAppServer:
                         raise ValueError("isolated reader history cannot contain symlinks")
                     if any(not file.endswith(".jsonl") or not (Path(root) / file).is_file() for file in files):
                         raise ValueError("isolated reader history accepts JSONL transcript files only")
+        if projection.exists():
+            _validate_history_projection(projection, _transcript_thread_ids(source_location))
         runtime_home = Path(tempfile.mkdtemp(prefix="watchkeeper-codex-reader-"))
         proc = None
         rpc = None
@@ -101,7 +250,7 @@ class JsonLineAppServer:
             env["XDG_CACHE_HOME"] = str(runtime_home / "cache")
             version = subprocess.run([binary, "--version"], capture_output=True, text=True,
                                      timeout=timeout, check=True, env=env, cwd=str(runtime_home))
-            if not re.search(rf"(?<![0-9]){re.escape(CODEX_READER_VERSION)}(?![0-9])", version.stdout.strip()):
+            if not re.fullmatch(rf"codex-cli {re.escape(CODEX_READER_VERSION)}", version.stdout.strip()):
                 raise RuntimeError(f"Codex reader version must be {CODEX_READER_VERSION}")
             # App-server receives only the explicitly prepared state mirror. It
             # cannot discover or mutate the user's normal Codex home.
@@ -109,6 +258,10 @@ class JsonLineAppServer:
                 entry = source_location / dirname
                 if entry.is_dir():
                     shutil.copytree(entry, runtime_home / dirname, dirs_exist_ok=True)
+            if projection.exists():
+                runtime_projection = runtime_home / "thread_history_1.sqlite"
+                shutil.copyfile(projection, runtime_projection)
+                _validate_history_projection(runtime_projection, _transcript_thread_ids(source_location))
             proc = subprocess.Popen([binary, "app-server", "--listen", "stdio://"], stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1,
                                     env=env, cwd=str(runtime_home))
@@ -290,7 +443,7 @@ class CodexCollector:
             response = rpc.call("thread/list", {"archived": phase, "cursor": list_cursor,
                                                  "limit": min(self.page_size, self.max_threads - read),
                                                  "sortKey": "updated_at", "sortDirection": "desc", "useStateDbOnly": False,
-                                                 "sourceKinds": SOURCE_KINDS})
+                                                 "sourceKinds": SOURCE_KINDS, "modelProviders": []})
             data = response.get("data")
             if not isinstance(data, list):
                 raise RuntimeError("Codex thread/list returned no data page")
@@ -367,6 +520,9 @@ class CodexCollector:
                         gaps.append(f"Could not read turns for thread {thread_id}")
                         break
                     observations, complete = self._turn_observations(turns, thread_id, metadata)
+                    if not turns:
+                        complete = False
+                        gaps.append(f"No turns were returned for listed thread {thread_id}; history may be unsupported or incomplete")
                     work_pages += 1
                     next_turn_cursor = turn_response.get("nextCursor")
                     if next_turn_cursor is not None and not isinstance(next_turn_cursor, str):
