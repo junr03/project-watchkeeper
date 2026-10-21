@@ -20,6 +20,14 @@
       "text": "The draft outline is ready. I have not tested the planting plans."
     },
     {
+      "thread_id": "thread-plan",
+      "message_id": "msg-agent-question",
+      "revision": "1",
+      "source_timestamp": "2026-10-20T16:45:00Z",
+      "locator": "Synthetic Codex thread thread-plan, message msg-agent-question",
+      "text": "Which three planting zones should the guide cover? I need your choice before I can finish testing the plans."
+    },
+    {
       "thread_id": "thread-research",
       "message_id": "msg-next-step",
       "revision": "1",

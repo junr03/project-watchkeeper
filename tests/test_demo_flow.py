@@ -99,9 +99,11 @@ class HTTPFlowTest(unittest.TestCase):
         selected = [item for item in view["observations"] if item["source_id"] == self.batch["source_id"]]
         return {"project_id": project_id,
                 "outcome": "Publish a garden guide with three tested planting plans",
-                "next_action": "Ask a local nursery to confirm the planting dates",
-                "reasoning": "The draft is ready, but evidence says the plans are not tested.",
-                "evidence_refs": [item["observation_id"] for item in selected]}
+                "next_action": "Choose three planting zones for the garden guide",
+                "reasoning": "The source asks the user to choose the planting zones before testing can finish.",
+                "evidence_refs": [item["observation_id"] for item in selected],
+                "evidence_revisions": {item["observation_id"]: item["revision"] for item in selected},
+                "status": "explicit_request", "grouping_confidence": "strong"}
 
     def _page_csrf(self):
         _, page, headers = self._request("/", basic=(self.config.ui_username, self.config.ui_password))
@@ -126,7 +128,7 @@ class HTTPFlowTest(unittest.TestCase):
         emails = list(self.config.email_dir.glob("*.eml"))
         self.assertEqual(1, len(emails))
         email_text = message_from_bytes(emails[0].read_bytes(), policy=default).get_content()
-        self.assertIn("Ask a local nursery", email_text)
+        self.assertIn("Choose three planting zones", email_text)
         self.assertIn(self.base + "/", email_text)
 
         state_before_preview = self._request("/api/state", basic=(self.config.ui_username, self.config.ui_password))[1]
@@ -138,6 +140,9 @@ class HTTPFlowTest(unittest.TestCase):
         until = (self.clock() + timedelta(days=1)).isoformat()
         self.assertEqual(200, self._request("/api/projects/garden-guide/snooze", basic=(self.config.ui_username, self.config.ui_password),
                                             payload={"until": until}, csrf=csrf, cookie=cookie)[0])
+        snoozed_input = self._request("/api/review-input", token=self.config.reviewer_token)[1]
+        self.assertFalse(any(item["observation_id"] in proposal["evidence_refs"]
+                             for item in snoozed_input["observations"]))
         self._stop()
         self.clock.advance(hours=3)
         self._start()
@@ -152,7 +157,8 @@ class HTTPFlowTest(unittest.TestCase):
         self.clock.advance(hours=1)
         waking = dict(self.batch, cursor="cursor-wake", available=True)
         self.assertEqual(0, self._request("/api/observations", token=self.config.intake_token, payload=waking)[1]["stored"])
-        proposal["evidence_refs"] = self._proposal()["evidence_refs"]
+        # Replay the originally captured evidence. A reviewer snapshot excludes
+        # snoozed work, so a newly generated proposal would have no references.
         self._request("/api/reviews", token=self.config.reviewer_token, payload=proposal)
         _, csrf_page, _ = self._request("/", basic=(self.config.ui_username, self.config.ui_password))
         csrf2 = __import__("re").search(r"const csrf=\"([^\"]+)\"", csrf_page).group(1)

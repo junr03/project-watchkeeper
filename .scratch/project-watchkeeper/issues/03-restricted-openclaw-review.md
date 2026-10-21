@@ -10,13 +10,17 @@
 
 **Status:** ready-for-agent
 
+**Execution:** In progress — Luna `review_luna`; coordinator owns independent verification.
+
+**Branch:** `jnr/03-restricted-review`; isolated worktree, base ticket 01 (`e9edc33`, PR #2).
+
 **Work breakdown:**
 
 | Work ID | Deliverable | Depends on | Owner | State | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| W1 | Connect bounded OpenClaw assessment to the existing proposal and project interfaces within a constrained runtime | None | Unassigned | Planned | Synthetic observations produce validated proposals; denied tools, source access, and network paths are demonstrated |
-| W2 | Apply attention eligibility and uncertainty rules to page and digest outcomes | W1 | Unassigned | Planned | Controlled cases distinguish explicit requests, three-day inferred inactivity, active work, dependencies, and unsupported completion |
-| W3 | Evaluate actual reviewer judgment and hostile-input behavior independently of deterministic policy tests | W1, W2 | Unassigned | Planned | Recorded representative model runs and containment checks include false positives and unsupported claims; failures remain visible |
+| W1 | Connect bounded OpenClaw assessment to the existing proposal and project interfaces within a constrained runtime | None | Luna `review_luna` / coordinator verification | In progress | Synthetic observations produce validated proposals; denied tools, source access, and network paths are demonstrated |
+| W2 | Apply attention eligibility and uncertainty rules to page and digest outcomes | W1 | Luna `review_luna` / coordinator verification | In progress | Controlled cases distinguish explicit requests, three-day inferred inactivity, active work, dependencies, and unsupported completion |
+| W3 | Evaluate actual reviewer judgment and hostile-input behavior independently of deterministic policy tests | W1, W2 | Luna `review_luna` / coordinator verification | In progress | Recorded representative model runs and containment checks include false positives and unsupported claims; failures remain visible |
 
 ## Acceptance criteria
 
