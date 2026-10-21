@@ -1,8 +1,11 @@
 # Integration evidence and limits
 
-These references informed the design. Documented capabilities and inspected
-community code are candidate integration seams, not evidence that an
-end-to-end Watchkeeper installation has been tested.
+The references below informed the design. The implementation has separate
+[dependency verification](dependency-verification.md), synthetic slice evidence
+([01](evidence-01.md), [02](evidence-02.md), [03](evidence-03.md),
+[04](evidence-04.md), [05](evidence-05.md), [06](evidence-06.md), [07](evidence-07.md)), and
+remaining live validation gates. Reference documentation alone is not evidence
+that a reader or subscription-authenticated reviewer works end to end.
 
 The first slice uses Codex threads only. OpenCode, Claude, ChatGPT web, and
 Meta Muse are references for later source expansion, not dependencies of the
@@ -26,3 +29,19 @@ may access private data.
 This list does not require using every named community project. Prefer an
 existing supported reader when it meets the source contract; report missing
 capabilities instead of silently substituting partial coverage.
+
+## Live validation still required
+
+- On an explicitly authorized Mac installation, verify the pinned Codex reader
+  against the owner's actual source kinds, history projection, archives and
+  sleep/wake collection. Linux synthetic compatibility does not prove this.
+- With a separately authorized dedicated subscription OAuth profile, verify
+  inference, renewal, expiry/quota recovery and the representative synthetic
+  reviewer judgment cases, including false positives. No model API key fallback
+  is permitted. Controlled reviewer outputs do not prove model judgment.
+- The deployment owner supplies private HTTPS ingress, authentication secrets,
+  state/backup policy and a fixed mail recipient/transport, then explicitly
+  activates them. Production Envoy and Electricpeak remain separate work.
+
+These gates remain unverified; no private account or external notification was
+used to satisfy the synthetic milestone checks.

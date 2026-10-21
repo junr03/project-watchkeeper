@@ -2,7 +2,12 @@
 
 The coordinator independently passed the 64-test stack, then all 23 recovery
 checks after the final sizing and retry refinements. The implementation agent
-also passed the final 66-test stack. Compilation and diff checks passed.
+also passed the 67-test recovery branch after separating recent capture ordering
+from the historical cursor. The coordinator independently passed all 24 recovery
+checks, 32 combined recovery/privacy/evidence checks, and the 85-test integrated
+suite under the pinned Python 3.12 container with networking disabled, read-only
+source/root, non-root UID and ResourceWarning errors enabled. Compilation and
+diff checks passed.
 
 Deterministic application checks exercise bounded source-ordered windows,
 whole-thread context when it fits, escaped-JSON byte limits, the final unconsumed
@@ -21,6 +26,6 @@ non-root UID, dropped capabilities and no-new-privileges. It exited 4 with
 only an authentication failure status, before reading evidence. Subscription
 login, renewal, actual quotas and model judgment remain unverified.
 
-This checkpoint unblocks privacy integration and ticket 07 packaging. Combined
-privacy replay, retained-evidence scheduling, container restart and SMTP
-acceptance are verified separately before final milestone delivery.
+The final combined 93-test suite, privacy replay, retained-evidence scheduling,
+container restart and actual SMTP acceptance checks passed independently. See
+[portable milestone evidence](evidence-07.md).
