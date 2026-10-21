@@ -52,7 +52,8 @@ uses an otherwise clean temporary home. It does not select providers by
 default; `modelProviders: []` explicitly means all providers in this app-server
 version.
 
-Create `.watchkeeper-reader-state` containing this exact public-safe marker:
+For existing prepared mirrors, create `.watchkeeper-reader-state` containing
+this exact public-safe marker:
 
 ```json
 {"format":"watchkeeper-codex-reader-state-v1","credentials_excluded":true,"transcripts_only":true}
@@ -61,33 +62,40 @@ Create `.watchkeeper-reader-state` containing this exact public-safe marker:
 The marker records the operator's assertion about that directory; the
 collector still verifies the directory allowlist and rejects symlinks. Keep
 active transcript JSONL under `sessions/` and archived transcript JSONL under
-`archived_sessions/` so the app-server can see each collection scope. If you
-need modern turns, first choose those same transcript files, then back up only
-the projection database into the mirror. For example, after creating the
-mirror directories and copying the explicitly selected transcripts:
+`archived_sessions/` so the app-server can see each collection scope. To avoid
+manually refreshing a mirror, the opt-in `--prepare-from-codex-dir` mode builds
+a private temporary mirror for one run from an explicitly supplied directory:
 
 ```sh
-python3 - <<'PY'
-import sqlite3
-from pathlib import Path
-
-source = Path("/private/codex/thread_history_1.sqlite")
-destination = Path("/private/watchkeeper/codex-mirror/thread_history_1.sqlite")
-read_only = sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)
-try:
-    with sqlite3.connect(destination) as snapshot:
-        read_only.backup(snapshot)
-finally:
-    read_only.close()
-PY
+python -m watchkeeper.collector \
+  --enable-codex \
+  --source-id codex-local-primary \
+  --prepare-from-codex-dir /private/codex/data \
+  --intake-url https://watchkeeper.internal/api/observations \
+  --intake-token-file /private/watchkeeper/intake-token \
+  --cursor-file /private/watchkeeper/codex-cursor \
+  --codex-binary /opt/codex/0.162.1/bin/codex
 ```
 
-The source database is opened read-only. Keep the snapshot outside the
-repository with restricted permissions. The reader refuses a sidecar or a
-projection thread whose transcript was not selected; missing or empty modern
-history results remain partial rather than being treated as complete. An
-empty history projection is optional for older mirrors, but it may not support
-modern turn reads.
+This mode never discovers a home directory. It selects only `sessions/**/*.jsonl`,
+`archived_sessions/**/*.jsonl`, and the optional `thread_history_1.sqlite`.
+Configuration, authentication, `state_5.sqlite`, and other source files are
+not opened or copied. It snapshots transcript files into a mode-0700 temporary
+directory, then stages the history database and its WAL as raw files before
+running SQLite's read-only backup against the private staging copy. SQLite is
+never opened against the source database or SHM file. Before/after file
+fingerprints detect source changes during staging; if selected history changes,
+preparation fails as unavailable and can be retried on the next run. The
+transcript limit is 5,000 files, 128 MiB per file, and 512 MiB total; the
+projection plus WAL is limited to 512 MiB. Limit violations fail closed rather
+than truncating. The final projection is schema-checked and must contain only
+threads represented by selected transcripts. The temporary mirror is removed
+after collection, including failure paths. Keep the source directory private;
+the temporary mirror is private too.
+
+The existing `--source-dir` option remains available for a manually prepared
+mirror. Missing or empty modern history results remain partial rather than
+being treated as complete.
 
 The optional actual-binary check uses a temporary home and a local fake
 Responses API; it does not read account files or contact a hosted model:
