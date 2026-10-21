@@ -14,7 +14,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from watchkeeper.config import Config
-from watchkeeper.db import Database
+from watchkeeper.db import Database, SCHEMA_VERSION
 from watchkeeper.delivery import FileEmailSink
 from watchkeeper.http import serve
 from watchkeeper.service import WatchkeeperService
@@ -59,7 +59,7 @@ class SchemaMigrationTest(unittest.TestCase):
             connection.close()
             db = Database(path)
             with db.connect() as c:
-                self.assertEqual(3, c.execute("PRAGMA user_version").fetchone()[0])
+                self.assertEqual(SCHEMA_VERSION, c.execute("PRAGMA user_version").fetchone()[0])
                 row = c.execute("SELECT disposition,snooze_until FROM projects WHERE project_id='kept-project'").fetchone()
                 self.assertEqual("open", row["disposition"])
                 self.assertEqual("2026-10-22T16:00:00+00:00", row["snooze_until"])

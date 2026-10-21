@@ -10,6 +10,7 @@ from .db import Database
 from .delivery import fingerprint
 from .intake import Intake
 from .policy import validate_proposal
+from .privacy import PrivacyManager
 
 
 def iso(value: datetime) -> str:
@@ -19,15 +20,48 @@ def iso(value: datetime) -> str:
 
 
 class WatchkeeperService:
-    def __init__(self, database: Database, email_sink, clock=None, stale_after_seconds=3600):
+    def __init__(self, database: Database, email_sink, clock=None, stale_after_seconds=3600,
+                 transcript_retention_days=30, privacy_journal=None, privacy_purge_hooks=None,
+                 captured_email_dir=None):
         self.db = database
         self.email_sink = email_sink
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.stale_after_seconds = stale_after_seconds
         self.intake = Intake(database, self.clock, stale_after_seconds)
+        self.privacy = PrivacyManager(database,
+            privacy_journal or f"{database.path}.privacy.jsonl", captured_email_dir,
+            transcript_retention_days, self.clock, purge_hooks=privacy_purge_hooks)
+        self.privacy.replay()
+        self.privacy.expire()
 
     def ingest(self, batch: dict) -> dict:
-        return self.intake.ingest(batch)
+        self.privacy.expire()
+        required = {"source_id", "cursor", "available", "observations"}
+        optional = {"coverage", "thread_coverage"}
+        if (isinstance(batch, dict) and required <= set(batch) and set(batch) <= required | optional and
+                isinstance(batch.get("observations"), list) and
+                all(isinstance(item, dict) and all(isinstance(item.get(k), str)
+                    for k in ("thread_id", "message_id", "revision")) for item in batch["observations"])):
+            batch, excluded = self.privacy.filter_excluded(batch)
+            batch, suppressed = self.privacy.filter_expired_replays(batch)
+        else:
+            suppressed = 0
+            excluded = 0
+        result = self.intake.ingest(batch)
+        self.privacy.refresh_watermarks()
+        result["expired_replays_suppressed"] = suppressed + result.get("expired_replays_suppressed", 0)
+        result["excluded_observations_skipped"] = excluded
+        return result
+
+    def expire_retention(self):
+        """Public maintenance hook for the later daily scheduler."""
+        return self.privacy.expire()
+
+    def deletion_preview(self, project_id):
+        return self.privacy.preview(project_id)
+
+    def delete_project(self, project_id, impact_token, *, confirmed):
+        return self.privacy.delete_project(project_id, impact_token, confirmed=confirmed)
 
     def _excluded(self, c, source_id, thread_id):
         return (c.execute("SELECT 1 FROM excluded_sources WHERE source_id=?", (source_id,)).fetchone() is not None or
@@ -60,8 +94,13 @@ class WatchkeeperService:
             if not isinstance(supplied_threads, dict):
                 supplied_threads = {}
             with self.db.connect() as c:
-                thread_ids = [r[0] for r in c.execute("SELECT DISTINCT thread_id FROM observations WHERE source_id=?",
-                                                       (source_id,))]
+                thread_ids = {r[0] for r in c.execute("SELECT thread_id FROM observations WHERE source_id=? UNION "
+                                                       "SELECT thread_id FROM thread_progress_watermarks WHERE source_id=?",
+                                                       (source_id, source_id))}
+                thread_ids.update(supplied_threads)
+                watermarks = {r["thread_id"]: dict(r) for r in c.execute(
+                    "SELECT thread_id,last_progress_at,revision,last_captured_at FROM thread_progress_watermarks WHERE source_id=?",
+                    (source_id,))}
             trusted_threads = {}
             for thread_id in thread_ids:
                 thread = supplied_threads.get(thread_id, {})
@@ -79,12 +118,18 @@ class WatchkeeperService:
                 thread["coverage_complete"] = bool(thread_complete)
                 thread.setdefault("gaps", [] if thread_complete else ["Source coverage is incomplete"])
                 thread["active"] = thread.get("active") is True or thread.get("status") in {"active", "running", "in_progress"} or thread_activity == "observed-running"
+                watermark = watermarks.get(thread_id)
+                if watermark:
+                    thread["last_progress_at"] = watermark["last_progress_at"]
+                    thread["last_progress_revision"] = watermark["revision"]
+                    thread["last_progress_captured_at"] = watermark["last_captured_at"]
                 trusted_threads[thread_id] = thread
             item["threads"] = trusted_threads
             normalized[source_id] = item
         return normalized
 
     def review(self, proposal: dict) -> dict:
+        self.privacy.expire()
         with self.db.connect() as c:
             c.execute("BEGIN IMMEDIATE")
             rows = c.execute("SELECT * FROM observations").fetchall()
@@ -94,6 +139,15 @@ class WatchkeeperService:
             # observations cannot be smuggled back into a review proposal.
             obs = {oid: row for oid, row in all_obs.items()
                    if not self._excluded(c, row["source_id"], row["thread_id"])}
+            expired_ids = {r[0] for r in c.execute("SELECT observation_id FROM expired_observations")}
+            retained_projects = c.execute("""SELECT evidence_json FROM projects WHERE disposition='open'
+                AND archived=0 AND (snooze_until IS NULL OR snooze_until<=?)""", (iso(self.clock()),)).fetchall()
+            for project in retained_projects:
+                for item in json.loads(project["evidence_json"]):
+                    oid = item.get("observation_id")
+                    if (oid in expired_ids and oid not in obs and
+                            not self._excluded(c, item.get("source_id"), item.get("thread_id"))):
+                        obs[oid] = item
             assessment = validate_proposal(proposal, obs, now=self.clock(), sources=sources)
             evidence_rows = [obs[ref] for ref in assessment["evidence_refs"]]
             owners = {r["project_id"] for r in c.execute("SELECT source_id,thread_id,project_id FROM thread_ownership").fetchall()
@@ -245,21 +299,41 @@ class WatchkeeperService:
                          AND (p.snooze_until IS NULL OR p.snooze_until<=?)))
                 ORDER BY o.captured_at DESC LIMIT 501""", (iso(self.clock()),)).fetchall()
             projects = c.execute("""SELECT project_id,outcome,next_action,disposition,snooze_until,archived,
-                assessment_kind,eligible,eligibility_reason,updated_at FROM projects WHERE disposition='open'
+                assessment_kind,eligible,eligibility_reason,updated_at,evidence_json FROM projects WHERE disposition='open'
                 AND archived=0 AND (snooze_until IS NULL OR snooze_until<=?) ORDER BY project_id""",
                 (iso(self.clock()),)).fetchall()
             proposals = c.execute("SELECT proposal_id,requested_project_id,outcome,next_action,reasoning,evidence_json,status,grouping_confidence,reason,created_at FROM review_proposals ORDER BY created_at DESC LIMIT 100").fetchall()
         has_more = len(rows) > 500
         rows = rows[:500]
-        return {"observations": [dict(row) for row in rows], "projects": [dict(row) for row in projects],
+        visible = {row["observation_id"] for row in rows}
+        active_projects = []
+        for row in projects:
+            project = dict(row)
+            evidence = json.loads(project.pop("evidence_json"))
+            retained = [item for item in evidence if item.get("observation_id") not in visible and
+                        not self._excluded_from_context(item)]
+            project["retained_evidence"] = retained
+            active_projects.append(project)
+            for item in retained:
+                if len(rows) >= 500:
+                    has_more = True
+                    continue
+                rows.append(item)
+                visible.add(item.get("observation_id"))
+        return {"observations": [dict(row) for row in rows], "projects": active_projects,
                 "proposals": [{**{k: v for k, v in dict(row).items() if k != "evidence_json"},
                                "evidence": json.loads(row["evidence_json"])} for row in proposals],
                 "sources": sources, "current_time": iso(self.clock()),
                 "coverage": {"observation_limit": 500, "observations_truncated": has_more,
                              "next_before": rows[-1]["captured_at"] if has_more and rows else None}}
 
+    def _excluded_from_context(self, evidence):
+        with self.db.connect() as c:
+            return self._excluded(c, evidence.get("source_id"), evidence.get("thread_id"))
+
     def deliver_pending(self) -> dict:
         """Deliver pending outbox rows through the configured fixed-recipient sink."""
+        self.privacy.expire()
         with self.db.connect() as c:
             rows = c.execute("SELECT * FROM outbox WHERE status='pending' ORDER BY created_at,delivery_id").fetchall()
         delivered = 0
@@ -334,35 +408,13 @@ class WatchkeeperService:
     def exclude_source(self, source_id: str, excluded: bool) -> dict:
         if not source_id or len(source_id) > 200:
             raise ValueError("invalid source_id")
-        with self.db.connect() as c:
-            c.execute("BEGIN IMMEDIATE")
-            if excluded:
-                c.execute("INSERT OR IGNORE INTO excluded_sources VALUES(?,?)", (source_id, iso(self.clock())))
-            else:
-                c.execute("DELETE FROM excluded_sources WHERE source_id=?", (source_id,))
-            # Any source-level exclusion change invalidates pending work for
-            # every project associated with that source, including discovered
-            # many-to-many links and explicit user locks.
-            c.execute("""UPDATE outbox SET status='cancelled' WHERE status='pending' AND project_id IN
-                (SELECT project_id FROM project_threads WHERE source_id=? UNION
-                 SELECT project_id FROM thread_ownership WHERE source_id=?)""", (source_id, source_id))
-            c.commit()
+        self.privacy.set_source_excluded(source_id, excluded)
         return {"source_id": source_id, "excluded": excluded}
 
     def exclude_thread(self, source_id: str, thread_id: str, excluded: bool) -> dict:
         if not source_id or not thread_id or len(source_id) > 200 or len(thread_id) > 500:
             raise ValueError("invalid source or thread identity")
-        with self.db.connect() as c:
-            c.execute("BEGIN IMMEDIATE")
-            if excluded:
-                c.execute("INSERT OR IGNORE INTO excluded_threads VALUES(?,?,?)", (source_id, thread_id, iso(self.clock())))
-            else:
-                c.execute("DELETE FROM excluded_threads WHERE source_id=? AND thread_id=?", (source_id, thread_id))
-            c.execute("""UPDATE outbox SET status='cancelled' WHERE status='pending' AND project_id IN
-                (SELECT project_id FROM project_threads WHERE source_id=? AND thread_id=? UNION
-                 SELECT project_id FROM thread_ownership WHERE source_id=? AND thread_id=?)""",
-                      (source_id, thread_id, source_id, thread_id))
-            c.commit()
+        self.privacy.set_thread_excluded(source_id, thread_id, excluded)
         return {"source_id": source_id, "thread_id": thread_id, "excluded": excluded}
 
     def assign_thread(self, source_id: str, thread_id: str, project_id: str, from_project_id=None) -> dict:

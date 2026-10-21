@@ -8,6 +8,7 @@ import html
 import json
 import secrets
 from urllib.parse import parse_qs, quote, unquote, urlparse
+from .privacy import ConflictError
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -85,6 +86,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed_url = urlparse(self.path)
         path = parsed_url.path
+        preview_project = self._deletion_preview_part(path)
+        if preview_project is not None:
+            if not self._basic():
+                self._unauthorized()
+                return
+            self._run(lambda: self.app.service.deletion_preview(preview_project))
+            return
         if path == "/api/review-input":
             if not self._bearer(self.app.config.reviewer_token):
                 self._json(401, {"error": "unauthorized"})
@@ -118,6 +126,7 @@ class Handler(BaseHTTPRequestHandler):
 <h2>{'Archived projects' if archived_view else 'Active projects'}</h2>{projects or '<p>No projects in this view.</p>'}<button id="deliver" type="button">Capture pending digest</button><script>
 const csrf={json.dumps(csrf)};
 document.querySelectorAll('form[data-action]').forEach(form=>form.addEventListener('submit',async ev=>{{ev.preventDefault();const data={{}};if(form.elements.until)data.until=new Date(form.elements.until.value).toISOString();if(form.elements.project_id)data.project_id=form.elements.project_id.value;if(form.elements.from_project_id)data.from_project_id=form.elements.from_project_id.value;if(form.elements.new_project_id&&form.elements.new_project_id.value.trim())data.project_id=form.elements.new_project_id.value.trim();const r=await fetch(form.dataset.action,{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},body:JSON.stringify(data)}});if(r.ok)location.reload();else alert('Action was not saved.');}}));
+document.querySelectorAll('form[data-delete-project]').forEach(form=>form.addEventListener('submit',async ev=>{{ev.preventDefault();const id=form.dataset.deleteProject;const encoded=encodeURIComponent(id);const p=await fetch('/api/projects/'+encoded+'/deletion-preview');if(!p.ok){{alert('Could not load deletion preview.');return;}}const impact=await p.json();const threads=impact.affected_threads.map(t=>t.source_id+' / '+t.thread_id).join(', ')||'none';const projects=impact.affected_projects.join(', ')||'none';const message='Delete '+id+'? This deletes the selected project, excludes '+impact.affected_threads.length+' known conversation(s): '+threads+'. It also clears derived summaries for directly affected shared projects: '+projects+'. It removes '+impact.pending_notifications+' queued notification(s) and '+impact.captured_emails+' captured email(s). Unrelated conversations remain.';if(!window.confirm(message))return;const r=await fetch('/api/projects/'+encoded+'/delete',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},body:JSON.stringify({{confirm:true,impact_token:impact.impact_token}})}});if(r.ok)location.reload();else if(r.status===409)alert('Shared conversations changed. Reload and review the updated impact.');else alert('Deletion was not completed.');}}));
 document.getElementById('deliver').addEventListener('click',async()=>{{const r=await fetch('/api/deliver',{{method:'POST',headers:{{'X-CSRF-Token':csrf,'Content-Length':'0'}}}});const d=await r.json();alert(r.ok?'Captured '+d.delivered+' digest email(s).':(d.error||'Delivery failed'));}});
 </script></body></html>"""
             self._html(page, csrf)
@@ -135,6 +144,7 @@ document.getElementById('deliver').addEventListener('click',async()=>{{const r=a
             controls = action("restore")
         else:
             controls = action("complete") + action("abandon") + action("reopen") + action("archive")
+        controls += (f"<form data-delete-project=\"{html.escape(project['project_id'], quote=True)}\"><button>Delete project…</button></form>")
         status = f"<p><small>Assessment: {html.escape(project['assessment_kind'])}; eligible: {str(project['eligible']).lower()}; disposition: {html.escape(project['disposition'])}</small></p>"
         if project["eligibility_reason"]:
             status += f"<p><small>{html.escape(project['eligibility_reason'])}</small></p>"
@@ -193,6 +203,22 @@ document.getElementById('deliver').addEventListener('click',async()=>{{const r=a
 
     def do_POST(self):
         path = urlparse(self.path).path
+        delete_project = self._delete_project_part(path)
+        if delete_project is not None:
+            if not self._basic():
+                self._unauthorized()
+                return
+            if not self._csrf():
+                self._json(403, {"error": "csrf validation failed"})
+                return
+            def delete_action():
+                payload = self._body()
+                if set(payload) != {"confirm", "impact_token"}:
+                    raise ValueError("delete requires explicit confirmation and the preview impact token")
+                return self.app.service.delete_project(delete_project, payload["impact_token"],
+                                                       confirmed=payload["confirm"])
+            self._run(delete_action)
+            return
         if path == "/api/observations":
             if not self._bearer(self.app.config.intake_token):
                 self._json(401, {"error": "unauthorized"})
@@ -281,6 +307,20 @@ document.getElementById('deliver').addEventListener('click',async()=>{{const r=a
         return path[len(prefix):-len(suffix)] if path.startswith(prefix) and path.endswith(suffix) else "__invalid__"
 
     @staticmethod
+    def _deletion_preview_part(path):
+        parts = path.split("/")
+        if len(parts) == 5 and parts[1:3] == ["api", "projects"] and parts[4] == "deletion-preview":
+            return unquote(parts[3])
+        return None
+
+    @staticmethod
+    def _delete_project_part(path):
+        parts = path.split("/")
+        if len(parts) == 5 and parts[1:3] == ["api", "projects"] and parts[4] == "delete":
+            return unquote(parts[3])
+        return None
+
+    @staticmethod
     def _project_action(path):
         parts = path.split("/")
         if len(parts) == 6 and parts[1:3] == ["api", "projects"] and parts[4] == "actions" and parts[5] in {"complete", "abandon", "reopen", "snooze", "archive", "restore"}:
@@ -311,6 +351,8 @@ document.getElementById('deliver').addEventListener('click',async()=>{{const r=a
             self._json(200, operation())
         except KeyError as exc:
             self._json(404, {"error": str(exc)})
+        except ConflictError as exc:
+            self._json(409, {"error": str(exc)})
         except (ValueError, json.JSONDecodeError) as exc:
             self._json(400, {"error": str(exc)})
         except Exception:
