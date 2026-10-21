@@ -1,7 +1,7 @@
 # Implementation guide
 
-Status: Draft for consolidated review. The [specification](../.scratch/project-watchkeeper/spec.md)
-is the source of truth for accepted behavior. Archive remains a proposal.
+The [ready-for-agent specification](../.scratch/project-watchkeeper/spec.md)
+is the source of truth for accepted behavior.
 This guide describes the intended implementation, not a tested installation.
 
 ## First demonstration
@@ -136,7 +136,7 @@ exclusion identifiers to prevent re-import. Explain shared-thread effects
 before confirmation. Define backup expiry and restore-time deletion replay;
 do not promise that purging the live store instantly erases historical backups.
 
-Archive, if accepted, is a separate reversible visibility/reminder choice.
+Archive is a separate reversible visibility/reminder choice.
 It does not imply completion, abandonment, deletion, or unlimited retention.
 
 ## Configurable interfaces
@@ -180,8 +180,8 @@ model API keys must not be a prerequisite.
 
 These are outcome boundaries, not a mandated PR count. Keep changes reviewable
 and preserve meaningful tests at each boundary. Revisit scope before
-materially expanding the first demonstration. Do not generate implementation
-tickets until the scope receives the final shared-understanding confirmation.
+materially expanding the first demonstration. Propose the expected PR range
+during ticket breakdown; this spec publication does not generate tickets.
 
 ## Acceptance checks
 
@@ -203,7 +203,7 @@ tickets until the scope receives the final shared-understanding confirmation.
 | Unauthenticated or direct UI access | Cannot read private project data or bypass authentication |
 | Hostile instructions inside a transcript | Cannot change tools, credentials, recipients, or source accounts |
 | Restart during intake or delivery | Recover checkpoints/outbox without losing user decisions |
-| Archive and restore, if accepted | Suppress reminders reversibly without overriding lifecycle or retention |
+| Archive and restore | Suppress reminders reversibly without overriding lifecycle or retention |
 
 Use deterministic fixtures for policy and recovery assertions. Evaluate model
 judgment on representative cases, including false-positive traps; do not

@@ -64,6 +64,11 @@ not by itself establish completion.
 **Abandonment**:
 A user decision to stop pursuing a project's intended outcome.
 
+**Archive**:
+A reversible user decision to hide a project from the active view and pause
+its attention reviews and reminders while retaining its record and disposition.
+_Avoid_: Deletion, abandonment
+
 **Deletion**:
 A user decision to remove a project's stored content and exclude its known
 threads from future imports until explicitly re-enabled.
