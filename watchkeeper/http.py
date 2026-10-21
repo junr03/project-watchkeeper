@@ -40,7 +40,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
         if csrf:
-            self.send_header("Set-Cookie", f"pw_csrf={csrf}; SameSite=Strict; Path=/; HttpOnly")
+            secure = "; Secure" if urlparse(self.app.config.public_base_url).scheme == "https" else ""
+            self.send_header("Set-Cookie", f"pw_csrf={csrf}; SameSite=Strict; Path=/; HttpOnly{secure}")
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -66,9 +67,9 @@ class Handler(BaseHTTPRequestHandler):
             if name == "pw_csrf":
                 cookie = value
         supplied = self.headers.get("X-CSRF-Token", "")
-        configured = urlparse(self.app.config.public_base_url)
         origin = urlparse(self.headers.get("Origin", ""))
-        same_origin = (configured.scheme, configured.netloc) == (origin.scheme, origin.netloc)
+        canonical = f"{origin.scheme}://{origin.netloc}" if origin.scheme and origin.netloc else ""
+        same_origin = canonical in self.app.config.allowed_origins
         return bool(same_origin and cookie and supplied and hmac.compare_digest(cookie.encode("utf-8"), supplied.encode("utf-8")))
 
     def _body(self):
@@ -86,6 +87,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed_url = urlparse(self.path)
         path = parsed_url.path
+        if path == "/healthz":
+            self._json(200, {"status": "ok"})
+            return
+        if path == "/readyz":
+            ready = getattr(self.app, "ready", False) is True
+            self._json(200 if ready else 503, {"status": "ready" if ready else "starting"})
+            return
         preview_project = self._deletion_preview_part(path)
         if preview_project is not None:
             if not self._basic():
@@ -122,17 +130,26 @@ class Handler(BaseHTTPRequestHandler):
                 f"<li>{html.escape(item['category'])} · {html.escape(item['subject'])}: "
                 f"{html.escape(item['failure_kind'])} ({item['occurrences']} failed attempts)</li>"
                 for item in state.get("monitoring", {}).get("open_notices", []))
+            delivery_labels = {"accepted": "Accepted by the configured transport",
+                               "retryable": "Not accepted; waiting to retry",
+                               "ambiguous": "May have been accepted; will not retry automatically",
+                               "cancelled": "Cancelled", "sending": "Sending"}
+            delivery_history = "".join(
+                f"<li>{html.escape(delivery_labels.get(item['status'], 'Delivery status unavailable'))} · "
+                f"{html.escape(item['updated_at'])} · {item['findings']} finding(s), {item['notices']} notice(s)"
+                + (f" · retry after {html.escape(item['retry_after'])}" if item.get("retry_after") else "")
+                + "</li>" for item in state.get("monitoring", {}).get("deliveries", []))
             page = f"""<!doctype html><html><head><meta charset="utf-8"><title>Project Watchkeeper</title>
 <style>body{{font:16px system-ui;max-width:900px;margin:2rem auto;padding:0 1rem}}article{{border:1px solid #bbb;border-radius:8px;padding:1rem;margin:1rem 0}}small{{color:#555}}form{{display:inline-block;margin:.25rem}}</style></head><body>
 <h1>Project Watchkeeper</h1><p>Observed sources</p><ul>{sources or '<li>None yet</li>'}</ul>
 <h2>Collection and review notices</h2><ul>{notices or '<li>None.</li>'}</ul>
 <h2>Pending proposals</h2>{proposals or '<p>None.</p>'}<h2>Exclusions</h2>{exclusions or '<p>None.</p>'}
 <p><a href="/">Active projects</a> · <a href="/?view=archived">Archived projects</a></p>
-<h2>{'Archived projects' if archived_view else 'Active projects'}</h2>{projects or '<p>No projects in this view.</p>'}<button id="deliver" type="button">Capture pending digest</button><script>
+<h2>{'Archived projects' if archived_view else 'Active projects'}</h2>{projects or '<p>No projects in this view.</p>'}<button id="deliver" type="button">Send pending digest</button><h2>Delivery history</h2><ul>{delivery_history or '<li>No messages sent.</li>'}</ul><script>
 const csrf={json.dumps(csrf)};
 document.querySelectorAll('form[data-action]').forEach(form=>form.addEventListener('submit',async ev=>{{ev.preventDefault();const data={{}};if(form.elements.until)data.until=new Date(form.elements.until.value).toISOString();if(form.elements.project_id)data.project_id=form.elements.project_id.value;if(form.elements.from_project_id)data.from_project_id=form.elements.from_project_id.value;if(form.elements.new_project_id&&form.elements.new_project_id.value.trim())data.project_id=form.elements.new_project_id.value.trim();const r=await fetch(form.dataset.action,{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},body:JSON.stringify(data)}});if(r.ok)location.reload();else alert('Action was not saved.');}}));
-document.querySelectorAll('form[data-delete-project]').forEach(form=>form.addEventListener('submit',async ev=>{{ev.preventDefault();const id=form.dataset.deleteProject;const encoded=encodeURIComponent(id);const p=await fetch('/api/projects/'+encoded+'/deletion-preview');if(!p.ok){{alert('Could not load deletion preview.');return;}}const impact=await p.json();const threads=impact.affected_threads.map(t=>t.source_id+' / '+t.thread_id).join(', ')||'none';const projects=impact.affected_projects.join(', ')||'none';const message='Delete '+id+'? This deletes the selected project, excludes '+impact.affected_threads.length+' known conversation(s): '+threads+'. It also clears derived summaries for directly affected shared projects: '+projects+'. It removes '+impact.pending_notifications+' queued notification(s) and '+impact.captured_emails+' captured email(s). Unrelated conversations remain.';if(!window.confirm(message))return;const r=await fetch('/api/projects/'+encoded+'/delete',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},body:JSON.stringify({{confirm:true,impact_token:impact.impact_token}})}});if(r.ok)location.reload();else if(r.status===409)alert('Shared conversations changed. Reload and review the updated impact.');else alert('Deletion was not completed.');}}));
-document.getElementById('deliver').addEventListener('click',async()=>{{const r=await fetch('/api/deliver',{{method:'POST',headers:{{'X-CSRF-Token':csrf,'Content-Length':'0'}}}});const d=await r.json();alert(r.ok?'Captured '+d.emails+' digest email(s) covering '+d.delivered+' finding(s).':(d.error||'Delivery failed'));}});
+document.querySelectorAll('form[data-delete-project]').forEach(form=>form.addEventListener('submit',async ev=>{{ev.preventDefault();const id=form.dataset.deleteProject;const encoded=encodeURIComponent(id);const p=await fetch('/api/projects/'+encoded+'/deletion-preview');if(!p.ok){{alert('Could not load deletion preview.');return;}}const impact=await p.json();const threads=impact.affected_threads.map(t=>t.source_id+' / '+t.thread_id).join(', ')||'none';const projects=impact.affected_projects.join(', ')||'none';const message='Delete '+id+'? This deletes the selected project, excludes '+impact.affected_threads.length+' known conversation(s): '+threads+'. It also clears derived summaries for directly affected shared projects: '+projects+'. It removes '+impact.pending_notifications+' pending notification(s) and '+impact.captured_emails+' app-controlled captured email(s). Mail already accepted by an external server cannot be recalled. Unrelated conversations remain.';if(!window.confirm(message))return;const r=await fetch('/api/projects/'+encoded+'/delete',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},body:JSON.stringify({{confirm:true,impact_token:impact.impact_token}})}});if(r.ok)location.reload();else if(r.status===409)alert('Shared conversations changed. Reload and review the updated impact.');else alert('Deletion was not completed.');}}));
+document.getElementById('deliver').addEventListener('click',async()=>{{const r=await fetch('/api/deliver',{{method:'POST',headers:{{'X-CSRF-Token':csrf,'Content-Length':'0'}}}});const d=await r.json();let message;if(!r.ok)message=d.error||'Delivery failed';else if(d.status==='ambiguous')message='The message may have been accepted. Watchkeeper will not retry it automatically.';else if(d.status==='retryable')message='The message was not accepted and is waiting for a retry.';else if(d.status==='cancelled_stale')message='The digest was cancelled because its findings changed.';else message='Processed '+d.emails+' digest message(s) covering '+d.delivered+' finding(s).';alert(message);if(r.ok)location.reload();}});
 </script></body></html>"""
             self._html(page, csrf)
             return
@@ -150,7 +167,19 @@ document.getElementById('deliver').addEventListener('click',async()=>{{const r=a
         else:
             controls = action("complete") + action("abandon") + action("reopen") + action("archive")
         controls += (f"<form data-delete-project=\"{html.escape(project['project_id'], quote=True)}\"><button>Delete project…</button></form>")
-        status = f"<p><small>Assessment: {html.escape(project['assessment_kind'])}; eligible: {str(project['eligible']).lower()}; disposition: {html.escape(project['disposition'])}</small></p>"
+        if project["disposition"] == "completed":
+            review_status = "Completed"
+        elif project["disposition"] == "abandoned":
+            review_status = "Abandoned"
+        elif project.get("archived"):
+            review_status = "Archived"
+        elif project["assessment_kind"] == "proposal":
+            review_status = "Proposal for your review"
+        elif project["eligible"]:
+            review_status = "Needs your attention"
+        else:
+            review_status = "Not currently eligible for a reminder"
+        status = f"<p><small>Status: {html.escape(review_status)}</small></p>"
         if project["eligibility_reason"]:
             status += f"<p><small>{html.escape(project['eligibility_reason'])}</small></p>"
         return f"<article><h3>{html.escape(project['outcome'])}</h3><p><b>Next action:</b> {html.escape(project['next_action'])}</p><p>{html.escape(project['reasoning'])}</p>{status}<h4>Evidence and grouping</h4><ul>{evidence}</ul>{snooze}{controls}</article>"
@@ -365,12 +394,18 @@ document.getElementById('deliver').addEventListener('click',async()=>{{const r=a
 
 
 class WatchkeeperHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
+    daemon_threads = False
+    block_on_close = True
     allow_reuse_address = True
 
     def __init__(self, address, app):
         self.app = app
         super().__init__(address, Handler)
+
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(30)
+        return request, address
 
 
 def serve(app, host="127.0.0.1", port=8765):

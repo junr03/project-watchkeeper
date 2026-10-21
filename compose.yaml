@@ -1,0 +1,145 @@
+# Synthetic local demonstration only. Use compose.production.yaml with private
+# secret files and an operator-selected private ingress for deployment.
+services:
+  app:
+    image: project-watchkeeper:0.1.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    stop_grace_period: ${WATCHKEEPER_STOP_GRACE_PERIOD:-3m}
+    read_only: true
+    user: "1000:2000"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      WATCHKEEPER_INTAKE_TOKEN: demo-intake-token-not-for-deployment
+      WATCHKEEPER_REVIEWER_TOKEN: demo-reviewer-token-not-for-deployment
+      WATCHKEEPER_UI_USERNAME: demo
+      WATCHKEEPER_UI_PASSWORD: demo-password-not-for-deployment
+      WATCHKEEPER_DATABASE: /var/lib/watchkeeper/watchkeeper.sqlite3
+      WATCHKEEPER_EMAIL_DIR: /var/lib/watchkeeper/email
+      WATCHKEEPER_PRIVACY_JOURNAL: /var/lib/watchkeeper/privacy.jsonl
+      WATCHKEEPER_RECIPIENT: recipient@example.invalid
+      WATCHKEEPER_MAIL_SENDER: watchkeeper@example.invalid
+      WATCHKEEPER_MAIL_TRANSPORT: smtp
+      WATCHKEEPER_MAIL_HOST: smtp-sink
+      WATCHKEEPER_MAIL_PORT: "1025"
+      WATCHKEEPER_MAIL_SECURITY: plain
+      WATCHKEEPER_PUBLIC_BASE_URL: ${WATCHKEEPER_PUBLIC_BASE_URL:-http://127.0.0.1:8765}
+      WATCHKEEPER_ALLOWED_ORIGINS: ${WATCHKEEPER_ALLOWED_ORIGINS:-http://127.0.0.1:8765}
+      WATCHKEEPER_BIND_HOST: 0.0.0.0
+      WATCHKEEPER_PORT: "8765"
+      WATCHKEEPER_PROXY_MODE: ignore
+    volumes:
+      - watchkeeper-state:/var/lib/watchkeeper
+      - reviewer-broker:/run/watchkeeper/broker
+    ports:
+      - "127.0.0.1:${WATCHKEEPER_PUBLISH_PORT:-8765}:8765"
+    networks: [application, demo-access]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/readyz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  smtp-sink:
+    image: project-watchkeeper:0.1.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: [python, -m, watchkeeper.smtp_sink]
+    restart: unless-stopped
+    read_only: true
+    user: "1000:2000"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - smtp-captures:/var/lib/watchkeeper/smtp
+    networks: [application]
+    healthcheck:
+      test: [CMD, python, -c, "import socket; s=socket.create_connection(('127.0.0.1',1025),2); s.close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  private-ingress:
+    image: project-watchkeeper:0.1.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: [python, -m, watchkeeper.private_ingress]
+    restart: unless-stopped
+    read_only: true
+    user: "1000:2000"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      WATCHKEEPER_INGRESS_LISTEN: 0.0.0.0:8080
+      WATCHKEEPER_INGRESS_UPSTREAM: app:8765
+    ports:
+      - "127.0.0.1:${WATCHKEEPER_INGRESS_PUBLISH_PORT:-8766}:8080"
+    networks: [application, demo-access]
+    depends_on:
+      app:
+        condition: service_healthy
+    profiles: [acceptance]
+
+  reviewer:
+    image: project-watchkeeper-reviewer:0.1.0
+    build:
+      context: .
+      dockerfile: Dockerfile.reviewer
+    restart: unless-stopped
+    profiles: [live-reviewer]
+    network_mode: none
+    read_only: true
+    user: "1000:1000"
+    group_add: ["2000"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=0700,uid=1000,gid=1000
+    volumes:
+      - reviewer-auth:/run/watchkeeper/openclaw-auth
+      - reviewer-broker:/run/watchkeeper/broker:ro
+      - inference-proxy:/run/watchkeeper/proxy:ro
+      - ./runtime/openclaw/watchkeeper-review.json5:/etc/watchkeeper/openclaw.json5:ro
+    environment:
+      WATCHKEEPER_REVIEWER_BROKER_TOKEN: demo-reviewer-token-not-for-deployment
+      WATCHKEEPER_REVIEW_ONCE: "0"
+    depends_on: [inference-proxy]
+
+  inference-proxy:
+    image: project-watchkeeper:0.1.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: [python, -m, watchkeeper.reviewer_proxy]
+    restart: unless-stopped
+    profiles: [live-reviewer]
+    read_only: true
+    user: "1000:2000"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      WATCHKEEPER_PROXY_SOCKET: /run/watchkeeper/proxy/inference.sock
+      WATCHKEEPER_INFERENCE_HOSTS: api.openai.com,auth.openai.com,chatgpt.com
+    volumes:
+      - inference-proxy:/run/watchkeeper/proxy
+    networks: [inference-egress]
+
+volumes:
+  watchkeeper-state:
+  smtp-captures:
+  reviewer-broker:
+  inference-proxy:
+  reviewer-auth:
+
+networks:
+  application:
+    internal: true
+  demo-access:
+    driver: bridge
+  inference-egress: {}

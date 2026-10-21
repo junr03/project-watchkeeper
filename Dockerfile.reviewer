@@ -1,0 +1,15 @@
+FROM ghcr.io/openclaw/openclaw@sha256:f40d1e66fd14d8c5b49c832f4100f83b53fdc01f5108f7db11de38fd0ee6dbe5
+
+USER root
+RUN groupadd --gid 2000 watchkeeper-sockets \
+ && usermod --append --groups watchkeeper-sockets node \
+ && install -d -o node -g watchkeeper-sockets -m 0750 /opt/watchkeeper /run/watchkeeper/broker /run/watchkeeper/proxy \
+ && install -d -o node -g node -m 0700 /run/watchkeeper/openclaw-auth \
+ && install -d -o node -g node -m 0700 /tmp/watchkeeper-review-runs
+COPY --chown=node:watchkeeper-sockets watchkeeper /opt/watchkeeper/watchkeeper
+USER node
+ENV PYTHONPATH=/opt/watchkeeper PYTHONDONTWRITEBYTECODE=1 HOME=/tmp \
+    OPENCLAW_STATE_DIR=/run/watchkeeper/openclaw-auth \
+    WATCHKEEPER_REVIEWER_BROKER_SOCKET=/run/watchkeeper/broker/app.sock \
+    WATCHKEEPER_REVIEWER_PROXY_SOCKET=/run/watchkeeper/proxy/inference.sock
+ENTRYPOINT ["python3", "-m", "watchkeeper.reviewer"]

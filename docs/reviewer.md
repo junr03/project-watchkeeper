@@ -45,8 +45,9 @@ docker run --rm --network none --read-only --cap-drop ALL \
 ```
 
 To verify that an empty auth mount fails before any evidence job is claimed,
-run the repository worker in a deployment with the authenticated application
-broker socket mounted at `/run/watchkeeper/app.sock`. Set
+run the repository worker with the authenticated broker and proxy parent
+directories mounted read-only at `/run/watchkeeper/broker` and
+`/run/watchkeeper/proxy`. Set
 `WATCHKEEPER_REVIEW_ONCE=1` to perform exactly one preflight and exit (status 4
 for authentication failure); the default worker polls continuously.
 
@@ -59,7 +60,8 @@ docker run --rm --network none --read-only --cap-drop ALL \
   -e WATCHKEEPER_REVIEWER_BROKER_TOKEN=synthetic-test-token \
   -e WATCHKEEPER_REVIEW_ONCE=1 \
   -v "$PWD:/opt/watchkeeper:ro" \
-  -v "$WATCHKEEPER_APP_SOCKET:/run/watchkeeper/app.sock" \
+  -v "$WATCHKEEPER_BROKER_DIRECTORY:/run/watchkeeper/broker:ro" \
+  -v "$WATCHKEEPER_PROXY_DIRECTORY:/run/watchkeeper/proxy:ro" \
   -v "$PWD/runtime/openclaw/watchkeeper-review.json5:/etc/watchkeeper/openclaw.json5:ro" \
   ghcr.io/openclaw/openclaw@sha256:f40d1e66fd14d8c5b49c832f4100f83b53fdc01f5108f7db11de38fd0ee6dbe5 \
   python3 -m watchkeeper.reviewer
@@ -70,12 +72,16 @@ fail-closed authentication preflight. No login, subscription refresh, proxy
 connectivity, or live model inference was attempted.
 
 Provision one OpenAI subscription OAuth profile with the exact id
-`openai:watchkeeper-subscription` in a separate operator-controlled auth
-directory. Use OpenClaw's supported auth command in a separately authorized
-setup environment, targeting the dedicated state directory and agent:
+`openai:watchkeeper-subscription` in the dedicated reviewer-auth state
+directory. In a separately authorized setup environment, mount only that
+directory read-write and the fixed OpenClaw config read-only. Set both state
+and config paths explicitly so the command cannot discover a default account
+home:
 
 ```sh
-openclaw models auth login --provider openai --method device-code \
+HOME=/tmp OPENCLAW_STATE_DIR=/run/watchkeeper/openclaw-auth \
+  OPENCLAW_CONFIG_PATH=/etc/watchkeeper/openclaw.json5 \
+  openclaw models auth login --provider openai --method device-code \
   --profile-id openai:watchkeeper-subscription --agent main
 ```
 
@@ -116,7 +122,10 @@ wildcards, literal IPs, and non-443 CONNECT requests are rejected. The proxy
 does not expose the application broker or user actions. Its Unix socket is the
 only network path available to the isolated reviewer.
 
-The broker token is passed to the worker process, not to OpenClaw. The child
+Compose mounts the parent directories `/run/watchkeeper/broker` and
+`/run/watchkeeper/proxy` read-only into the reviewer; it does not bind-mount
+socket inodes, so process restarts can safely recreate sockets. The broker
+token is passed to the worker process, not to OpenClaw. The child
 environment contains only the runtime path, an empty `HOME`, the dedicated
 OAuth state path, the temporary loopback proxy, and basic locale settings.
 Source text, prompt, and model output are not written by Watchkeeper to durable

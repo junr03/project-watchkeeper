@@ -52,7 +52,7 @@ the operator's retention and access controls. Deletion removes matching
 app-controlled captured `.eml` files when an email-capture directory is
 configured; it cannot recall messages already delivered elsewhere.
 
-The service exposes `expire_retention()` for a later maintenance scheduler.
+The application scheduler calls `expire_retention()` on its bounded poll loop.
 Deletion also provides a `privacy_purge_hooks` constructor seam. Each hook runs
 inside the deletion transaction with the directly affected `project_ids`,
 `threads` (`(source_id, thread_id)` pairs), `observation_ids`, and

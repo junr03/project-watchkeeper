@@ -10,14 +10,21 @@ implementation as well as this documentation PR.
 
 ## Deliverables owned by project-watchkeeper
 
+The current portable artifacts are [`Dockerfile`](../Dockerfile),
+[`Dockerfile.reviewer`](../Dockerfile.reviewer), [`compose.yaml`](../compose.yaml),
+[`compose.production.yaml`](../compose.production.yaml), and the optional
+[SMTP-auth overlay](../compose.production-smtp-auth.yaml). See the
+[container runtime guide](container-runtime.md) for startup, configuration,
+network, secret, backup, shutdown, and rollback procedures.
+
 - Versioned container artifacts and public-safe Compose examples with
   independently constrained components where privileges differ.
 - Documented configuration, credential-file, and persistent-state interfaces.
-- Configurable UID/GID, service ports, private base URL, trusted proxy/origin
-  settings, authentication, and network dependencies.
+- Configurable internal service port, private base URL and CSRF origin allowlist,
+  mandatory application authentication, and network dependencies.
 - A private-ingress contract suitable for the existing Electricpeak Envoy
-  pattern. Application authentication must remain effective if an upstream
-  address can be reached directly.
+  pattern. Application authentication remains effective if an upstream address
+  is reached directly; forwarded identity headers are ignored.
 - Health/readiness checks and documented startup, shutdown, retry, retention,
   deletion, backup, migration, and rollback behavior.
 - A configurable email transport and fixed-recipient delivery interface.
@@ -38,7 +45,7 @@ to this repository's implementation agent:
 | Source Compose under `containers/source/<group>/docker-compose.yml`; generated Compose Nix imports in `configuration.nix` | Supply a portable Compose example the deployment owner can adapt |
 | Home Manager file mirroring and `onChange` patterns | Document expected runtime paths and configuration reload/restart behavior |
 | Runtime file secrets and consumer ordering/restarts | Support narrow credential-file mounts with documented permissions |
-| Envoy as the existing service entry point | Document upstream port, private base URL, authentication, and proxy trust requirements |
+| Envoy as the existing service entry point | Document upstream port, private base URL, authentication, and ignored forwarded-identity headers |
 | Production deployment from main after Nix checks | Supply versioned artifacts and rollback information; host validation stays with the deployment owner |
 
 The Electricpeak owner separately chooses image versions, host storage,
@@ -67,8 +74,9 @@ denied paths so the deployment owner can enforce them.
 
 For the separate deployment work, document how to verify:
 
-- Actual Envoy/private-network reachability, authentication, and protection
-  against direct-upstream bypass.
+- Actual Envoy/private-network reachability, mandatory app authentication, and
+  protection against direct-upstream bypass; forwarded identity headers do not
+  authenticate users.
 - Narrow secret/state mounts, permissions, image compatibility, and allowed
   network destinations.
 - Account login and renewal, reader coverage, and delivery to the configured

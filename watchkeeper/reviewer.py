@@ -12,6 +12,7 @@ import json
 import os
 import fcntl
 import resource
+import stat
 import shutil
 import sys
 import tempfile
@@ -261,7 +262,8 @@ class OpenClawReviewer:
                  entrypoint: str = "/app/openclaw.mjs",
                  config_path: str = "/etc/watchkeeper/openclaw.json5",
                  model: str = "openai/gpt-6-astra", timeout_seconds: int = 180,
-                 max_input_chars: int = 240_000, run_root: str = "/tmp/watchkeeper-review-runs"):
+                 max_input_chars: int = 240_000, run_root: str = "/tmp/watchkeeper-review-runs",
+                 proxy_socket: str = "/run/watchkeeper/proxy/inference.sock"):
         self.broker = broker
         self.command = command
         self.entrypoint = entrypoint
@@ -270,6 +272,7 @@ class OpenClawReviewer:
         self.timeout_seconds = max(10, min(300, int(timeout_seconds)))
         self.max_input_chars = max(1024, min(240_000, int(max_input_chars)))
         self.run_root = run_root
+        self.proxy_socket = proxy_socket
         self.active_job = None
         self.retry_after_seconds = 0
 
@@ -329,8 +332,7 @@ class OpenClawReviewer:
         try:
             with _disposable_state(self.run_root) as state_dir:
                 argv.extend(["--state-dir", str(state_dir)])
-                proxy_socket = "/run/watchkeeper/inference.sock"
-                with UnixProxyBridge(proxy_socket) as bridge:
+                with UnixProxyBridge(self.proxy_socket) as bridge:
                     env["HTTPS_PROXY"] = bridge.url
                     env["HTTP_PROXY"] = bridge.url
                     with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
@@ -379,6 +381,19 @@ class OpenClawReviewer:
 def main() -> int:
     """Emit content-free run status suitable for container health monitoring."""
     token = os.environ.get("WATCHKEEPER_REVIEWER_BROKER_TOKEN", "")
+    token_file = os.environ.get("WATCHKEEPER_REVIEWER_BROKER_TOKEN_FILE")
+    if token and token_file:
+        print(json.dumps({"status": "failure", "failure": "authentication"}))
+        return 2
+    if token_file:
+        try:
+            token_path = Path(token_file)
+            info = token_path.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size > 4096:
+                raise ValueError("invalid token file")
+            token = token_path.read_text(encoding="utf-8").rstrip("\r\n")
+        except (OSError, UnicodeError, ValueError):
+            token = ""
     if not token:
         print(json.dumps({"status": "failure", "failure": "authentication"}))
         return 2
@@ -389,7 +404,8 @@ def main() -> int:
         config_path="/etc/watchkeeper/openclaw.json5",
         model="openai/gpt-6-astra",
         timeout_seconds=int(os.environ.get("WATCHKEEPER_REVIEW_TIMEOUT_SECONDS", "180")),
-        max_input_chars=int(os.environ.get("WATCHKEEPER_REVIEW_MAX_INPUT_CHARS", "240000")))
+        max_input_chars=int(os.environ.get("WATCHKEEPER_REVIEW_MAX_INPUT_CHARS", "240000")),
+        proxy_socket=os.environ.get("WATCHKEEPER_REVIEWER_PROXY_SOCKET", "/run/watchkeeper/proxy/inference.sock"))
     poll_seconds = max(5, min(300, int(os.environ.get("WATCHKEEPER_REVIEW_POLL_SECONDS", "30"))))
     once = os.environ.get("WATCHKEEPER_REVIEW_ONCE", "0") == "1"
     while True:

@@ -3,32 +3,44 @@
 A self-hosted monitor that tracks unfinished projects across AI conversations
 and surfaces the next action that needs your attention.
 
-The first synthetic slice accepts Codex-shaped observations, stores one
-evidence-backed project, renders an authenticated control page, and captures a
-deduplicated digest in a local `.eml` sink. It does not connect to live Codex
-threads or send real email. Other sources and live reader compatibility are
-later work.
+The repository contains a synthetic local demonstration, an explicitly
+invoked Codex collector, a restricted optional reviewer, an authenticated web
+application, and configurable container artifacts. The default Compose stack
+uses only generated content, demo credentials, and a local SMTP capture sink;
+it does not connect to a source account, hosted model, or external mail server.
 
-Run the synthetic flow with Python 3.12 or newer:
-
-```sh
-python3 -m watchkeeper.demo
-```
-
-Run the application acceptance suite with:
+For a local container startup with Docker Compose 2.24.4 or newer:
 
 ```sh
-python3 -m unittest discover -s tests -v
+docker compose config --quiet
+docker compose up --build -d --wait
+curl -fsS http://127.0.0.1:8765/readyz
 ```
 
-See the [application contract](docs/application-contract.md) for the HTTP
-boundaries, credentials, request shapes, and production service settings.
+Open `http://127.0.0.1:8765` and sign in with the public synthetic credentials
+`demo` / `demo-password-not-for-deployment`. Run the controlled browser,
+direct-upstream authentication, ingress, restart, deletion, and local-mail
+acceptance with external Playwright tooling using
+[`tests/compose-acceptance.sh`](tests/compose-acceptance.sh). For the standalone
+Python flow, run `python3 -m watchkeeper.demo`; the test suite runs with
+`python3 -m unittest discover -s tests -v`.
+
+The app and reviewer images are versioned `0.1.0` and use pinned base image
+digests. `compose.production.yaml` is an operator template that requires
+private secret files, explicit HTTPS origins, an SMTP server, and externally
+managed private networks. Read [container operations](docs/container-runtime.md)
+before adapting it. Live Codex, OAuth, model judgment, outbound SMTP, ingress
+firewall rules, and deployment-specific renewal behavior remain explicit
+operator validation gates; they were not exercised with private accounts or
+external services here.
+
+See the [application contract](docs/application-contract.md), [Codex source
+reader](docs/codex-reader.md), [restricted reviewer](docs/reviewer.md),
+[recovery guidance](docs/recovery.md), and [Electricpeak handoff](docs/deployment-electricpeak.md).
 
 - [Feature specification](.scratch/project-watchkeeper/spec.md)
-- [Codex-only implementation tickets](.scratch/project-watchkeeper/README.md)
 - [Implementation guide and acceptance checks](docs/implementation.md)
-- [Electricpeak deployment handoff](docs/deployment-electricpeak.md)
 - [Integration evidence and limitations](docs/integration-evidence.md)
 - [Domain glossary](GLOSSARY.md)
-- [Observation boundary](docs/adr/0001-separate-observation-from-project-execution.md)
+- [Observation boundary ADR](docs/adr/0001-separate-observation-from-project-execution.md)
 - [Agent conventions](AGENTS.md)
