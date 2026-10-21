@@ -41,3 +41,18 @@ older than the source's current state.
 
 **Digest**:
 A scheduled collection of new actionable information delivered to the user.
+
+**Coverage**:
+The portion of a source's available history that Watchkeeper has observed,
+including known gaps and limits.
+
+**Collection notice**:
+A finding that Watchkeeper cannot reliably observe a source and may need
+the user's help to restore visibility.
+_Avoid_: Attention item (when no project action has been established)
+
+**Snooze**:
+A user decision to defer a project's attention items until a chosen time.
+
+**Exclusion**:
+A user decision to keep a conversation or source outside monitoring.
