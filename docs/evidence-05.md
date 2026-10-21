@@ -31,3 +31,10 @@ This establishes the privacy slice and completes ticket 04's archive/retention
 criterion. Combined scheduler cache, aggregate mail and reviewer lease deletion
 checks follow in ticket 07. Backup-media expiry and external mail recall remain
 operator limitations, documented in `privacy.md`; no production changes occurred.
+
+Integration review added a retained-revision regression: an old project
+snapshot cannot override a current raw row outside the input window or become
+current evidence after a newer raw revision expires. The shared selector checks
+the latest expiry metadata while preserving the original project provenance.
+The coordinator independently reran all nine privacy service tests, passing
+with ResourceWarnings treated as errors.

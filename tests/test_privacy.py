@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote
@@ -96,6 +97,36 @@ class PrivacyAcceptanceTest(unittest.TestCase):
         with self.service.db.connect() as c:
             self.assertEqual("new revision", c.execute("SELECT text FROM observations WHERE thread_id='t-open'").fetchone()[0])
 
+    def test_review_fallback_never_uses_old_snapshot_after_newer_revision_expires(self):
+        self._ingest([("t-open", "m1", "1", "2026-10-21T15:00:00Z", "old snapshot text")])
+        old_ref = self._refs()[0]
+        self._review("open-item", [old_ref])
+
+        # A current raw row outside review_input's bounded window must prevent
+        # the project snapshot from being mislabeled as retained evidence.
+        self.clock.advance(minutes=1)
+        self._ingest([("t-extra", f"m{i}", "1", "2026-10-21T15:01:00Z", f"extra {i}")
+                      for i in range(501)], "c2")
+        review_input = self.service.review_input()
+        self.assertTrue(review_input["coverage"]["observations_truncated"])
+        project_input = next(p for p in review_input["projects"] if p["project_id"] == "open-item")
+        self.assertEqual([], project_input["retained_evidence"])
+        self.assertNotIn(old_ref, {item["observation_id"] for item in review_input["observations"]})
+
+        # The active row advances to revision 2 and then expires. The project
+        # still keeps r1 as provenance, but neither review surface may revive it.
+        self._ingest([("t-open", "m1", "2", "2026-10-21T16:01:00Z", "new revision text")], "c3")
+        self.clock.advance(days=2)
+        self.service.expire_retention()
+        state_project = next(p for p in self.service.state()["projects"] if p["project_id"] == "open-item")
+        self.assertEqual("1", state_project["evidence"][0]["revision"])
+        review_input = self.service.review_input()
+        project_input = next(p for p in review_input["projects"] if p["project_id"] == "open-item")
+        self.assertEqual([], review_input["observations"])
+        self.assertEqual([], project_input["retained_evidence"])
+        with self.assertRaises(ValueError):
+            self._review("open-item", [old_ref])
+
     def test_closed_expired_snapshot_is_removed_on_later_maintenance_but_archived_open_kept(self):
         self._ingest([("t-closed", "m1", "1", "2026-10-21T15:00:00Z", "closed text"),
                       ("t-archived", "m2", "1", "2026-10-21T15:00:00Z", "archived text")])
@@ -179,10 +210,11 @@ class PrivacyAcceptanceTest(unittest.TestCase):
             c.execute("PRAGMA wal_checkpoint(FULL)")
         snapshot = self.root / "restore-only.sqlite"
         shutil.copy2(self.db_path, snapshot)
-        with sqlite3.connect(snapshot) as c:
+        with closing(sqlite3.connect(snapshot)) as c:
             c.execute("INSERT INTO outbox VALUES(?,?,?,?,?,NULL)",
                       ("restore-only", "A", "restore-fingerprint", "2026-10-21T16:00:00+00:00", "delivered"))
-        with sqlite3.connect(snapshot) as c:
+            c.commit()
+        with closing(sqlite3.connect(snapshot)) as c:
             c.execute("PRAGMA wal_checkpoint(FULL)")
         preview = self.service.deletion_preview("A")
         self.service.delete_project("A", preview["impact_token"], confirmed=True)
