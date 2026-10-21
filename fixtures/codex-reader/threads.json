@@ -1,0 +1,47 @@
+{
+  "source_id": "codex-fixture-installation",
+  "source_version": "0.162.1",
+  "threads": [
+    {
+      "id": "fixture-thread-garden-1",
+      "archived": false,
+      "threadSource": "cli",
+      "updatedAt": 1792602000,
+      "turns": [
+        {"id": "turn-g1", "status": "completed", "startedAt": 1792600000, "completedAt": 1792600100,
+         "items": [
+           {"id": "message-g1-user", "type": "userMessage", "content": [{"type": "text", "text": "Help me publish a tested garden guide."}], "startedAtMs": 1792600000000, "turnId": "turn-g1"},
+           {"id": "message-g1-agent", "type": "agentMessage", "text": "The draft is ready, but the planting plans are not tested.", "completedAtMs": 1792600100000, "turnId": "turn-g1"}
+         ]}
+      ]
+    },
+    {
+      "id": "fixture-thread-garden-2",
+      "archived": false,
+      "threadSource": "vscode",
+      "updatedAt": 1792603000,
+      "turns": [
+        {"id": "turn-g2a", "status": "completed", "startedAt": 1792601000, "completedAt": 1792601100,
+         "items": [
+           {"id": "message-g2-user", "type": "userMessage", "content": [{"type": "text", "text": "Can you verify the planting dates with a nursery?"}], "startedAtMs": 1792601000000, "turnId": "turn-g2a"}
+         ]},
+        {"id": "turn-g2b", "status": "completed", "startedAt": 1792602000, "completedAt": 1792602100,
+         "items": [
+           {"id": "message-g2-agent", "type": "agentMessage", "text": "I prepared a checklist. Please ask the local nursery to confirm dates.", "completedAtMs": 1792602100000, "turnId": "turn-g2b"}
+         ]}
+      ]
+    },
+    {
+      "id": "fixture-thread-archived",
+      "archived": true,
+      "threadSource": "appServer",
+      "updatedAt": 1792500000,
+      "turns": [
+        {"id": "turn-archived", "status": "completed", "startedAt": 1792499000, "completedAt": 1792499100,
+         "items": [
+           {"id": "message-archived-user", "type": "userMessage", "content": [{"type": "text", "text": "Synthetic archived fixture content."}], "startedAtMs": 1792499000000, "turnId": "turn-archived"}
+         ]}
+      ]
+    }
+  ]
+}
