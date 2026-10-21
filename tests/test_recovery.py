@@ -109,7 +109,7 @@ class RecoveryTest(unittest.TestCase):
             if rows:
                 self.assertFalse(job["review_input"]["sources"]["codex:test-install"]["threads"]["thread-a"]["coverage_complete"])
             self.assertEqual("success", self._finish_empty(job)["status"])
-        self.assertEqual([2, 2, 1], [len(rows) for rows in windows])
+        self.assertEqual([2, 2, 2, 1], [len(rows) for rows in windows])
         self.assertEqual({f"message-{i}" for i in range(5)},
                          {row["message_id"] for window in windows for row in window})
         with self.service.db.connect() as c:
@@ -180,7 +180,14 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual("success", service.complete_review_job(first["run_id"], first["lease_token"], [])["status"])
         second = service.claim_review_job()
         self.assertEqual(1, len(second["review_input"]["observations"]))
-        self.assertFalse(second["review_input"]["coverage"]["backlog_remaining"])
+        self.assertTrue(second["review_input"]["coverage"]["backlog_remaining"])
+        self.assertEqual("success", service.complete_review_job(second["run_id"], second["lease_token"], [])["status"])
+        third = service.claim_review_job()
+        self.assertEqual(1, len(third["review_input"]["observations"]))
+        self.assertNotEqual(first["review_input"]["observations"][0]["message_id"],
+                            third["review_input"]["observations"][0]["message_id"])
+        self.assertEqual("success", service.complete_review_job(third["run_id"], third["lease_token"], [])["status"])
+        self.assertFalse(third["review_input"]["coverage"]["backlog_remaining"])
 
     def test_review_windows_order_source_instants_across_offsets(self):
         earlier_utc = {"thread_id": "thread-a", "message_id": "earlier", "revision": "1",
@@ -488,8 +495,57 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual("success", service.complete_review_job(recent["run_id"], recent["lease_token"], [])["status"])
         history = service.claim_review_job()
         self.assertIsNotNone(history)
-        self.assertTrue({"message-2", "message-3"}.intersection(
-            {row["message_id"] for row in history["review_input"]["observations"]}))
+        self.assertEqual({"new-delta", "message-0"},
+            {row["message_id"] for row in history["review_input"]["observations"]})
+
+    def test_recent_capture_order_finds_old_revision_without_moving_history_cursor(self):
+        root = Path(self.temp.name)
+        service = WatchkeeperService(Database(root / "recent-old-revision.sqlite"),
+            FileEmailSink(root / "recent-old-revision-mail", "demo@example.invalid"), clock=self.clock,
+            schedule_timezone="UTC", review_time="00:00", digest_time="00:00",
+            review_window_limit=2, review_windows_per_day=3)
+        items = self.observations(6)
+        service.ingest(self.batch(items))
+
+        initial_recent = service.claim_review_job()
+        self.assertEqual("recent", self._job_stream(service, initial_recent))
+        self.assertEqual("success", service.complete_review_job(initial_recent["run_id"],
+            initial_recent["lease_token"], []) ["status"])
+        first_history = service.claim_review_job()
+        self.assertEqual("history", self._job_stream(service, first_history))
+        history_page_ids = {row["message_id"] for row in first_history["review_input"]["observations"]}
+        self.assertEqual({"message-0", "message-1"}, history_page_ids)
+        self.assertEqual("success", service.complete_review_job(first_history["run_id"],
+            first_history["lease_token"], []) ["status"])
+        with service.db.connect() as c:
+            saved_cursor = c.execute("SELECT cursor_json FROM review_progress WHERE stream='history'").fetchone()[0]
+        self.assertIsNotNone(saved_cursor)
+
+        self.clock.advance(days=1)
+        revised = dict(items[4], revision="2", text="Synthetic revised old message")
+        service.ingest(self.batch([revised], cursor="old-message-revised-today"))
+        next_recent = service.claim_review_job()
+        self.assertEqual("recent", self._job_stream(service, next_recent))
+        recent_rows = next_recent["review_input"]["observations"]
+        self.assertEqual("message-4", recent_rows[0]["message_id"])
+        self.assertEqual("2", recent_rows[0]["revision"])
+        self.assertEqual("success", service.complete_review_job(next_recent["run_id"],
+            next_recent["lease_token"], []) ["status"])
+        with service.db.connect() as c:
+            self.assertEqual(saved_cursor,
+                c.execute("SELECT cursor_json FROM review_progress WHERE stream='history'").fetchone()[0])
+
+        resumed_history = service.claim_review_job()
+        self.assertEqual("history", self._job_stream(service, resumed_history))
+        resumed_ids = {row["message_id"] for row in resumed_history["review_input"]["observations"]}
+        self.assertEqual({"message-2", "message-3"}, resumed_ids)
+        self.assertFalse(resumed_ids.intersection(history_page_ids))
+
+    @staticmethod
+    def _job_stream(service, job):
+        with service.db.connect() as c:
+            row = c.execute("SELECT snapshot_json FROM monitoring_runs WHERE run_id=?", (job["run_id"],)).fetchone()
+        return json.loads(row[0])["stream"]
 
     def test_progress_watermark_prevents_old_retained_evidence_from_claiming_stall(self):
         current = self.clock()

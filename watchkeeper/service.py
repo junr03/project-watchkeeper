@@ -289,7 +289,7 @@ class WatchkeeperService:
                    project_id, assessment["outcome"], assessment["next_action"], self.db.json(evidence),
                    assessment.get("status", "uncertain_grouping"), assessment.get("grouping_confidence", "uncertain"), reason))
 
-    def review_input(self, *, cursor=None, limit=500, byte_limit=180_000) -> dict:
+    def review_input(self, *, cursor=None, limit=500, byte_limit=180_000, recent=False) -> dict:
         """Return observations eligible for review and a secret-free register view."""
         sources = self._source_context()
         with self.db.connect() as c:
@@ -299,9 +299,14 @@ class WatchkeeperService:
                 if (not isinstance(cursor, dict) or set(cursor) != {"source_timestamp", "captured_at", "observation_id"} or
                         any(not isinstance(cursor[k], str) for k in cursor)):
                     raise ValueError("invalid review cursor")
-                cursor_clause = " AND (julianday(o.source_timestamp) < julianday(?) OR (julianday(o.source_timestamp)=julianday(?) AND (o.captured_at < ? OR (o.captured_at=? AND o.observation_id<?))))"
-                parameters.extend([cursor["source_timestamp"], cursor["source_timestamp"],
-                                   cursor["captured_at"], cursor["captured_at"], cursor["observation_id"]])
+                if recent:
+                    cursor_clause = " AND (o.captured_at < ? OR (o.captured_at=? AND (julianday(o.source_timestamp)<julianday(?) OR (julianday(o.source_timestamp)=julianday(?) AND o.observation_id<?))))"
+                    parameters.extend([cursor["captured_at"], cursor["captured_at"], cursor["source_timestamp"],
+                                       cursor["source_timestamp"], cursor["observation_id"]])
+                else:
+                    cursor_clause = " AND (julianday(o.source_timestamp) < julianday(?) OR (julianday(o.source_timestamp)=julianday(?) AND (o.captured_at < ? OR (o.captured_at=? AND o.observation_id<?))))"
+                    parameters.extend([cursor["source_timestamp"], cursor["source_timestamp"],
+                                       cursor["captured_at"], cursor["captured_at"], cursor["observation_id"]])
             if type(limit) is not int or not 1 <= limit <= 500:
                 raise ValueError("review window limit must be between 1 and 500")
             if type(byte_limit) is not int or not 180_000 <= byte_limit <= 220_000:
@@ -317,7 +322,8 @@ class WatchkeeperService:
                        WHERE live_t.source_id=o.source_id AND live_t.thread_id=o.thread_id
                          AND p.disposition='open' AND p.archived=0
                          AND (p.snooze_until IS NULL OR p.snooze_until<=?)))""" + cursor_clause +
-                " ORDER BY julianday(o.source_timestamp) DESC,o.captured_at DESC,o.observation_id DESC LIMIT ?",
+                (" ORDER BY o.captured_at DESC,julianday(o.source_timestamp) DESC,o.observation_id DESC LIMIT ?"
+                 if recent else " ORDER BY julianday(o.source_timestamp) DESC,o.captured_at DESC,o.observation_id DESC LIMIT ?"),
                 (*parameters, limit + 1)).fetchall()
             projects = c.execute("""SELECT project_id,outcome,next_action,disposition,snooze_until,archived,
                 assessment_kind,eligible,eligibility_reason,updated_at FROM projects WHERE disposition='open'
@@ -330,6 +336,12 @@ class WatchkeeperService:
                           for row in projects]
         proposal_values = [{k: (row[k][:120] if isinstance(row[k], str) else row[k])
                             for k in row.keys()} for row in proposals]
+
+        def row_sort_key(row):
+            source_time = datetime.fromisoformat(row["source_timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc)
+            if recent:
+                return (row["captured_at"], source_time, row["observation_id"])
+            return (source_time, row["captured_at"], row["observation_id"])
 
         def compact_sources(selected_rows):
             result = {}
@@ -392,8 +404,7 @@ class WatchkeeperService:
             if pair in processed_pairs:
                 if seed["observation_id"] not in {row["observation_id"] for row in selected}:
                     candidate = selected + [seed]
-                    candidate.sort(key=lambda row: (datetime.fromisoformat(row["source_timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc),
-                                                    row["captured_at"], row["observation_id"]), reverse=True)
+                    candidate.sort(key=row_sort_key, reverse=True)
                     more = has_more or index < len(seeds) - 1
                     payload = payload_for(candidate, seed, more)
                     if len(candidate) > limit or len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > byte_limit:
@@ -411,8 +422,7 @@ class WatchkeeperService:
                     mark_partial(pair, "bounded review window history-read budget reached")
                     additions = [seed] if seed["observation_id"] not in {row["observation_id"] for row in selected} else []
                     candidate = selected + additions
-                    candidate.sort(key=lambda row: (datetime.fromisoformat(row["source_timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc),
-                                                    row["captured_at"], row["observation_id"]), reverse=True)
+                    candidate.sort(key=row_sort_key, reverse=True)
                     candidate_fits = (len(candidate) <= limit and len(json.dumps(payload_for(
                         candidate, seed, has_more or index < len(seeds) - 1),
                         ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= byte_limit)
@@ -426,8 +436,10 @@ class WatchkeeperService:
                     break
                 fetch_limit = min(limit + 1, nested_budget)
                 with self.db.connect() as c:
+                    thread_order = ("captured_at DESC,julianday(source_timestamp) DESC,observation_id DESC"
+                                    if recent else "julianday(source_timestamp) DESC,captured_at DESC,observation_id DESC")
                     thread_rows = [dict(row) for row in c.execute(
-                        "SELECT observation_id,source_id,thread_id,message_id,revision,source_timestamp,captured_at,locator,text FROM observations WHERE source_id=? AND thread_id=? ORDER BY julianday(source_timestamp) DESC,captured_at DESC,observation_id DESC LIMIT ?",
+                        "SELECT observation_id,source_id,thread_id,message_id,revision,source_timestamp,captured_at,locator,text FROM observations WHERE source_id=? AND thread_id=? ORDER BY " + thread_order + " LIMIT ?",
                         (*pair, fetch_limit)).fetchall()]
                 nested_budget -= len(thread_rows)
                 complete_thread = len(thread_rows) <= limit and len(thread_rows) < fetch_limit
@@ -440,8 +452,7 @@ class WatchkeeperService:
                 additions = [seed] if seed["observation_id"] not in already else []
                 mark_partial(pair)
             candidate = selected + additions
-            candidate.sort(key=lambda row: (datetime.fromisoformat(row["source_timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc),
-                                            row["captured_at"], row["observation_id"]), reverse=True)
+            candidate.sort(key=row_sort_key, reverse=True)
             more = has_more or index < len(seeds) - 1 or index == len(seeds) - 1 and len(rows) > limit
             payload = payload_for(candidate, seed, more)
             if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > byte_limit:
@@ -450,8 +461,7 @@ class WatchkeeperService:
                 fallback = [seed] if seed["observation_id"] not in already else []
                 mark_partial(pair, "bounded review window byte budget contains only part of this thread")
                 candidate = selected + fallback
-                candidate.sort(key=lambda row: (datetime.fromisoformat(row["source_timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc),
-                                                row["captured_at"], row["observation_id"]), reverse=True)
+                candidate.sort(key=row_sort_key, reverse=True)
                 fallback_more = has_more or index < len(seeds) - 1
                 payload = payload_for(candidate, seed, fallback_more)
                 if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > byte_limit:

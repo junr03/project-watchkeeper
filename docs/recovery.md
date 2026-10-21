@@ -24,8 +24,11 @@ After sleep, missed windows from earlier dates are superseded; the next daily
 run resumes from the last successfully committed cursor instead of draining a
 large stale queue.
 
-Windows are ordered by source timestamp, then capture time and stable message
-identity. If a window splits a thread, the worker receives explicit incomplete
+The newest-evidence window is ordered by capture time, then source timestamp
+and stable message identity, so a newly edited old message is reviewed promptly.
+Its ordering never changes the independent historical cursor. Historical
+backfill windows are ordered by source timestamp, then capture time and stable
+message identity. If a window splits a thread, the worker receives explicit incomplete
 thread coverage. Policy still rejects inferred inactivity claims against that
 partial context. A thread larger than a window advances through older messages
 over later windows, so it does not block other days indefinitely. The cursor
