@@ -26,10 +26,18 @@ conversations and surfaces the next action that needs your attention.
 
 ## First complete slice
 
-Observe OpenCode on a server and Codex on a Mac, discover unfinished work
-that needs the user, and deliver a digest. Demonstrate collection from both
-sources, retained visibility while the Mac sleeps, and silence on a repeat
-review with no new actionable information.
+Implement collectors for OpenCode on a server and Codex on a Mac, discover
+unfinished work that needs the user, and produce a digest. Demonstrate the
+flow using a synthetic project with source-shaped fixtures from both
+surfaces, a simulated Mac sleep/wake cycle, and a local email sink. No
+existing user project is assumed or required. Show retained visibility
+during simulated sleep and silence on a repeat review with no new actionable
+information.
+
+Fixture-based checks do not establish real collector compatibility. Validate
+the readers separately against pinned source versions and a controlled test
+session before claiming live support. Connecting private accounts and
+operating the service on Electricpeak are separate activation work.
 
 ChatGPT web, Claude, and Meta Muse remain in the intended scope. Add their
 collectors after this complete flow is demonstrated. Their inclusion is a
@@ -137,10 +145,17 @@ This public repository owns portable container packaging, configuration
 interfaces, safe examples, and implementation documentation. Private account
 details, credentials, transcripts, and host configuration stay outside Git.
 
-The deployment target is Electricpeak's existing Compose-to-Nix container
-framework. Electricpeak owns its deployment-specific image selection,
-storage, secret provisioning, networking, and rollout. This documentation PR
-does not deploy a service or authorize account connections.
+Electricpeak's existing Compose-to-Nix container framework is the intended
+consumer of this repository's deployment artifacts. All implementation work
+in this plan stays in project-watchkeeper. Its deliverables are portable
+containers, configurable examples, and a deployment handoff contract.
+
+Changes to Electricpeak's repository, Envoy routes, secrets, firewall, Nix
+imports, and running services are separate deployment work. Electricpeak
+owns image selection, storage, secret provisioning, networking, and rollout.
+This documentation PR does not deploy a service or authorize account
+connections; future Watchkeeper implementation does not include those
+Electricpeak changes either.
 
 ## Implementation guidance and final review
 

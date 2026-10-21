@@ -3,6 +3,12 @@
 A self-hosted monitor that tracks unfinished projects across AI
 conversations and surfaces the next action that needs your attention.
 
+## Repository scope
+Implement and document Project Watchkeeper in this repository. Provide
+portable container artifacts and a deployment handoff contract for
+Electricpeak. Changes to Electricpeak's repository or running services
+belong to separate deployment work.
+
 ## Agent skills
 
 ### Issue tracker

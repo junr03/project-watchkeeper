@@ -1,91 +1,80 @@
-# Electricpeak deployment contract
+# Electricpeak deployment handoff
 
-Status: Implementation guidance; no deployment is performed by this PR.
+Status: Interface contract for a future deployment owner.
 
-Project Watchkeeper provides portable container packaging and documented
-configuration, credential, and persistent-state interfaces. Electricpeak owns
-host-specific wiring and private configuration.
+All implementation work covered by this plan stays in project-watchkeeper.
+This repository supplies portable container artifacts, configurable Compose
+examples, and operating documentation. It does not modify Electricpeak's
+repository or running services. This boundary applies to the planned
+implementation as well as this documentation PR.
 
-## Existing seams to reuse
+## Deliverables owned by project-watchkeeper
 
-- Author Compose under `containers/source/<group>/docker-compose.yml`.
-  The repository's generator and PR workflow produce Compose Nix modules.
-  Add a new generated group's import to `configuration.nix`; do not edit
-  generated `docker-compose.nix` by hand.
-- Follow the existing Home Manager configuration mirroring and `onChange`
-  patterns for files under `containers/config`. Container-visible files must
-  not depend on inaccessible Nix-store symlinks.
-- Use runtime file secrets, narrow read-only mounts, ownership, and consumer
-  ordering/restarts through `modules/onepassword-secrets/default.nix`.
-  Never put resolved values or service-account tokens into source.
-- Pin deployed images by reviewed version/digest and keep persistent state
-  outside the container image. The deployment chooses UID/GID and storage.
-- Run applicable `nix flake check --no-build` and
-  `sudo nixos-rebuild build --flake .#electricpeak` checks for the later
-  Electricpeak integration change. Production deployment occurs from main.
-  These are not runtime tests for this documentation-only PR.
+- Versioned container artifacts and public-safe Compose examples with
+  independently constrained components where privileges differ.
+- Documented configuration, credential-file, and persistent-state interfaces.
+- Configurable UID/GID, service ports, private base URL, trusted proxy/origin
+  settings, authentication, and network dependencies.
+- A private-ingress contract suitable for the existing Electricpeak Envoy
+  pattern. Application authentication must remain effective if an upstream
+  address can be reached directly.
+- Health/readiness checks and documented startup, shutdown, retry, retention,
+  deletion, backup, migration, and rollback behavior.
+- A configurable email transport and fixed-recipient delivery interface.
+- Synthetic fixtures, a local email sink, and tests of the application and
+  container boundaries without production infrastructure.
 
-## Envoy and access
+Actual account identities, recipient addresses, credentials, host paths,
+Envoy routes, and private network policy are deployment configuration, not
+repository defaults.
 
-Expose the single-user control page through the existing Envoy service,
-following the established Electricpeak service pattern. Configure upstream
-address, private base URL, allowed origins, authentication, and private
-reachability in deployment configuration. Do not publish an additional UI
-host port. Ensure upstream access cannot bypass authentication.
+## Electricpeak integration context
 
-The public networking Compose mounts Envoy configuration and certificates
-read-only; the secret module connects its configuration to consumer restart
-handling. Public documentation also describes private Envoy configuration.
-The private production routes are unavailable in the inspected checkout, and
-the synchronization between the documented private file and runtime secret
-attachment is not established. Verify the production source of truth before
-changing routes; do not invent a reload or synchronization mechanism.
+These are reference facts for the future deployment owner, not tasks assigned
+to this repository's implementation agent:
 
-Private networking and Envoy routing do not establish authentication by
-themselves. No existing single-user authentication mechanism was verified in
-the public checkout. Verify or supply that boundary before exposing project
-data. Preserve existing firewall and overlay-network restrictions.
+| Existing host convention | Watchkeeper handoff requirement |
+| --- | --- |
+| Source Compose under `containers/source/<group>/docker-compose.yml`; generated Compose Nix imports in `configuration.nix` | Supply a portable Compose example the deployment owner can adapt |
+| Home Manager file mirroring and `onChange` patterns | Document expected runtime paths and configuration reload/restart behavior |
+| Runtime file secrets and consumer ordering/restarts | Support narrow credential-file mounts with documented permissions |
+| Envoy as the existing service entry point | Document upstream port, private base URL, authentication, and proxy trust requirements |
+| Production deployment from main after Nix checks | Supply versioned artifacts and rollback information; host validation stays with the deployment owner |
 
-Joining the existing shared Docker bridge is not sufficient reviewer
-isolation. Define reachability between Envoy, the control service, collectors,
-store, reviewer, and sender explicitly; verify denied paths as well as
-working routes.
+The Electricpeak owner separately chooses image versions, host storage,
+secret provisioning, service ordering, Envoy routes, authentication, firewall
+rules, and rollout. No Compose/Nix edits, host rebuilds, route changes, or
+production deployment are part of the Watchkeeper implementation sequence.
 
-## Email and account activation
+## Facts still requiring deployment verification
 
-No outbound email transport was verified in the public Electricpeak
-configuration. Supply a configured mail relay or user-authorized account
-transport and a fixed recipient at deployment time. Do not assume an existing
-Gmail integration or embed a third-party API key requirement.
+The inspected public networking Compose mounts Envoy configuration and
+certificates read-only, and runtime secret handling restarts its consumers.
+Public documentation also describes a private Envoy configuration file.
+The active private routes and synchronization between that file and the
+runtime secret attachment were not available to verify.
 
-Provision source-account access only after reader and containment checks.
-Provision the reviewer subscription login separately. Support explicit
-reauthentication without exposing tokens in logs or public configuration.
+No single-user authentication mechanism or outbound email transport was
+verified in the public checkout. The deployment owner must select and
+configure these interfaces. Do not assume Envoy routing authenticates users
+or that an existing Gmail/mail-relay integration is available.
 
-## Rollout and rollback gates
+The existing shared Docker bridge does not by itself provide reviewer
+isolation. The handoff must identify required component reachability and
+denied paths so the deployment owner can enforce them.
 
-Before activation, verify pinned-reader compatibility, private authentication,
-restricted network paths, volume permissions, retention/deletion, backup
-behavior, and delivery to the configured recipient. Start with synthetic
-fixtures and a captured digest, then enable the agreed real sources and
-delivery.
+## Operator acceptance checklist
 
-Keep prior image/config versions and compatible state backups available.
-State migrations must document rollback compatibility. Disable scheduling
-and delivery independently while investigating failures; preserve the
-project register and user decisions.
+For the separate deployment work, document how to verify:
 
-## Inspected Electricpeak paths
+- Actual Envoy/private-network reachability, authentication, and protection
+  against direct-upstream bypass.
+- Narrow secret/state mounts, permissions, image compatibility, and allowed
+  network destinations.
+- Account login and renewal, reader coverage, and delivery to the configured
+  recipient.
+- Restart recovery, retention/deletion, backups, and rollback compatibility.
 
-- `AGENTS.md`, `configuration.nix`
-- `containers/generate-docker-modules.sh`
-- `containers/source/networking/docker-compose.yml`
-- `containers/source/utilities/docker-compose.yml`
-- `modules/onepassword-secrets/default.nix`
-- `users/junr03/files.nix`, `users/junr03/scripts/mirror-file.sh`
-- `docs/secrets.md`
-- `.github/actions/generate_docker_modules/action.yml`
-- `.github/workflows/nixos.yml`
-
-These establish integration patterns, not the private deployment's current
-hostnames, credentials, authentication policy, or firewall state.
+Use generic examples and leave private values to the operator. These checks
+describe readiness requirements; they do not authorize this repository's
+agent to change Electricpeak or connect production accounts.

@@ -6,16 +6,28 @@ This guide describes the intended implementation, not a tested installation.
 
 ## First demonstration
 
-Use one unfinished example project spanning OpenCode on a server and Codex on
-a Mac. The project has a concrete next action for its user even though the
-last agent turn finished normally. Collect evidence from both sources,
-identify the outcome and next action, send a digest, and persist a user
-decision through the authenticated page. Repeat the review with the Mac
-asleep and demonstrate retained visibility without a duplicate reminder.
+Create a synthetic unfinished project, with source-shaped OpenCode and Codex
+fixtures representing a server session and a Mac session. It has a concrete
+next action for its user even though the last agent turn finished normally.
+This is a fabricated test scenario, not an existing project of the owner.
 
-Use synthetic conversations for automated checks and public fixtures.
-Real account access and delivery are activation steps after configuration;
-this documentation PR does neither.
+Feed the fixtures through the collection/intake interfaces, identify the
+outcome and next action, capture a digest in a local email sink, and persist
+a user decision through the authenticated page. Simulate the Mac going
+offline and returning with new observations. Repeat the review and show
+retained visibility without a duplicate reminder.
+
+Stub source transport, time/availability, and outbound email for repeatable
+tests; exercise the real intake, register, policy, and notification logic.
+Use controlled model responses for deterministic policy tests and evaluate
+the actual reviewer separately on the synthetic cases. Stubs do not count as
+proof of source-reader compatibility or semantic accuracy. The production
+collectors remain part of the first slice and need separate compatibility
+checks against pinned source versions and controlled test sessions.
+
+All implementation and fixtures live in project-watchkeeper. Real account
+connections, recipient delivery, and Electricpeak activation are separate
+operator work, not requirements for this synthetic demonstration.
 
 ## Components and trust boundaries
 
@@ -29,7 +41,7 @@ flowchart LR
     V --> R
     R --> D[Deterministic digest delivery]
     D --> E[Configured email recipient]
-    U[User via authenticated private Envoy route] --> P[Control page]
+    U[User via authenticated private ingress] --> P[Control page]
     P --> R
 ```
 
@@ -150,15 +162,18 @@ model API keys must not be a prerequisite.
 ## Delivery sequence
 
 1. **Prove compatibility and containment.** Pin OpenClaw and reader versions.
-   Verify subscription-authenticated review, representative history access,
-   and denied write/exec/account actions using disposable fixtures. Record
-   unsupported capabilities as facts.
+   Build source-shaped fixtures and verify denied write/exec/account actions.
+   Check actual reader compatibility using controlled test sessions; validate
+   subscription-authenticated review when an explicitly configured test
+   login is available. Report untested capabilities as untested.
 2. **Complete the first slice.** Build both initial collectors, durable intake
    and project state, restricted review, the control page, and digest delivery.
    Include the complete acceptance checks below before claiming the slice.
-3. **Activate on Electricpeak.** Use the deployment contract and private
-   configuration. Demonstrate a real digest and a persistent user action,
-   including laptop sleep and restart recovery.
+3. **Package and hand off.** Produce portable container artifacts,
+   configurable Compose examples, and the Electricpeak deployment contract
+   in this repository. Document runtime requirements and operator checks.
+   Electricpeak repository changes and production activation are separate
+   work, outside this implementation plan.
 4. **Expand one source at a time.** Add Claude, ChatGPT web, and Meta Muse
    readers only after the first demonstration. Each adapter must pass the
    same completeness, permission, and recovery contract.
@@ -192,5 +207,7 @@ tickets until the scope receives the final shared-understanding confirmation.
 
 Use deterministic fixtures for policy and recovery assertions. Evaluate model
 judgment on representative cases, including false-positive traps; do not
-claim that schema validation proves semantic accuracy. Container and Envoy
-boundary checks are required before real accounts are connected.
+claim that schema validation proves semantic accuracy. Test the container,
+application-authentication, and proxy contracts in this repository's test
+environment. The later deployment owner must verify the actual Envoy and
+private-network boundary before connecting real accounts.
