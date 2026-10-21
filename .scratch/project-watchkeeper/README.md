@@ -78,4 +78,5 @@ Current draft PRs: [01 / #2](https://github.com/junr03/project-watchkeeper/pull/
 [04 / #4](https://github.com/junr03/project-watchkeeper/pull/4),
 [03 / #5](https://github.com/junr03/project-watchkeeper/pull/5),
 [05 / #6](https://github.com/junr03/project-watchkeeper/pull/6),
-[06 / #7](https://github.com/junr03/project-watchkeeper/pull/7).
+[06 / #7](https://github.com/junr03/project-watchkeeper/pull/7),
+[07 / #8](https://github.com/junr03/project-watchkeeper/pull/8).
