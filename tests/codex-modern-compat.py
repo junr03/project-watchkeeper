@@ -22,15 +22,21 @@ from watchkeeper.collector import CODEX_READER_VERSION, JsonLineAppServer, SOURC
 
 
 class FakeResponsesHandler(BaseHTTPRequestHandler):
+    count = 0
+    count_lock = threading.Lock()
+
     def log_message(self, *_args):
         pass
 
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        item = {"id": "msg_synthetic_final", "type": "message", "role": "assistant",
+        with self.count_lock:
+            type(self).count += 1
+            count = type(self).count
+        item = {"id": f"msg_synthetic_final_{count}", "type": "message", "role": "assistant",
                 "status": "completed", "content": [{"type": "output_text",
-                "text": "Synthetic garden status: choose planting dates."}], "phase": "final_answer"}
-        response = {"id": "resp_synthetic", "object": "response", "created_at": 1792617000,
+                "text": f"Synthetic garden status {count}: choose planting dates."}], "phase": "final_answer"}
+        response = {"id": f"resp_synthetic_{count}", "object": "response", "created_at": 1792617000 + count,
                     "status": "completed", "model": "fixture", "output": [item],
                     "usage": {"input_tokens": 10, "output_tokens": 8, "total_tokens": 18}}
         events = [
@@ -60,6 +66,27 @@ def transcript_session_id(path):
     return None
 
 
+def run_codex(binary, root, env, provider_config, *args):
+    if len(args) < 2:
+        raise ValueError("synthetic Codex invocation needs a command and prompt")
+    command = [binary, *args[:-1], *provider_config, args[-1]]
+    result = subprocess.run(command, capture_output=True, text=True,
+                            env=env, cwd=root, timeout=60)
+    if result.returncode:
+        raise RuntimeError(f"synthetic Codex exec failed with exit {result.returncode}")
+
+
+def session_transcripts(root):
+    found = {}
+    directory = root / "sessions"
+    if directory.is_dir():
+        for path in directory.rglob("*.jsonl"):
+            thread_id = transcript_session_id(path)
+            if thread_id:
+                found[thread_id] = path
+    return found
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--codex-binary", required=True)
@@ -78,24 +105,41 @@ def main():
         if CODEX_READER_VERSION not in version.stdout:
             raise RuntimeError(f"expected Codex {CODEX_READER_VERSION}")
         url = f"http://127.0.0.1:{server.server_port}/v1"
-        command = [args.codex_binary, "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--model", "fixture",
-                   "-c", 'model_provider="fixture"', "-c", 'model_providers.fixture.name="fixture"',
-                   "-c", f'model_providers.fixture.base_url="{url}"', "-c", 'model_providers.fixture.wire_api="responses"',
-                   "-c", "model_providers.fixture.requires_openai_auth=false",
-                   "Synthetic compatibility check only. Write one short garden status asking me to choose planting dates. Do not call tools."]
-        result = subprocess.run(command, capture_output=True, text=True, env=clean_env, cwd=root, timeout=60)
-        if result.returncode:
-            raise RuntimeError(f"synthetic Codex exec failed with exit {result.returncode}")
+        provider_config = ["-c", 'model_provider="fixture"', "-c", 'model_providers.fixture.name="fixture"',
+                           "-c", f'model_providers.fixture.base_url="{url}"', "-c", 'model_providers.fixture.wire_api="responses"',
+                           "-c", "model_providers.fixture.requires_openai_auth=false"]
+        run_codex(args.codex_binary, root, clean_env, provider_config,
+                  "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--model", "fixture",
+                  "Synthetic compatibility check only. Write one short garden status asking me to choose planting dates. Do not call tools.")
+        first_sessions = session_transcripts(root)
+        if len(first_sessions) != 1:
+            raise RuntimeError("synthetic Codex exec did not create exactly one initial session")
+        first_thread_id = next(iter(first_sessions))
+        # Resume locally to create a second turn in the same synthetic thread.
+        run_codex(args.codex_binary, root, clean_env, provider_config,
+                  "exec", "resume", "--skip-git-repo-check", "--model", "fixture", first_thread_id,
+                  "Continue the synthetic garden status with one additional short sentence. Do not call tools.")
+        run_codex(args.codex_binary, root, clean_env, provider_config,
+                  "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--model", "fixture",
+                  "Synthetic compatibility check only. Write one short garden status asking me to choose planting dates. Do not call tools.")
+        run_codex(args.codex_binary, root, clean_env, provider_config,
+                  "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--model", "fixture",
+                  "Synthetic compatibility check only. Write one short garden status asking me to choose planting dates. Do not call tools.")
+        transcripts = session_transcripts(root)
+        if len(transcripts) != 3 or first_thread_id not in transcripts:
+            raise RuntimeError("synthetic Codex exec did not produce the expected three threads")
 
         mirror = root / "mirror"
         sessions = mirror / "sessions"
         sessions.mkdir(parents=True)
-        transcript = next((path for path in (root / "sessions").rglob("*.jsonl")
-                           if transcript_session_id(path)), None)
-        if transcript is None:
-            raise RuntimeError("synthetic Codex exec did not produce a session transcript")
-        thread_id = transcript_session_id(transcript)
-        shutil.copyfile(transcript, sessions / transcript.name)
+        archived = mirror / "archived_sessions"
+        archived.mkdir()
+        thread_ids = sorted(transcripts)
+        active_ids = set(thread_ids[:2])
+        archived_id = next(thread_id for thread_id in thread_ids if thread_id not in active_ids)
+        for thread_id, transcript in transcripts.items():
+            destination_dir = sessions if thread_id in active_ids else archived
+            shutil.copyfile(transcript, destination_dir / transcript.name)
         (mirror / ".watchkeeper-reader-state").write_text(json.dumps({
             "format": "watchkeeper-codex-reader-state-v1", "credentials_excluded": True, "transcripts_only": True,
         }), encoding="utf-8")
@@ -111,20 +155,49 @@ def main():
             source.close()
 
         app_server = JsonLineAppServer.launch(args.codex_binary, mirror)
-        listed = app_server.call("thread/list", {"archived": False, "cursor": None, "limit": 50,
-                                                  "sortKey": "updated_at", "sortDirection": "desc",
-                                                  "useStateDbOnly": False, "sourceKinds": SOURCE_KINDS,
-                                                  "modelProviders": []})
-        metadata = next((thread for thread in listed.get("data", []) if thread.get("id") == thread_id), None)
-        if metadata is None:
-            raise RuntimeError("modern synthetic thread was not listed with modelProviders=[]")
-        turns = app_server.call("thread/turns/list", {"threadId": thread_id, "cursor": None, "limit": 50,
-                                                        "sortDirection": "asc", "itemsView": "full"})
-        if not turns.get("data") or not any(turn.get("itemsView") == "full" and turn.get("items") for turn in turns["data"]):
-            raise RuntimeError("modern synthetic thread returned no full-view turn items")
-        item_count = sum(len(turn.get("items", [])) for turn in turns["data"])
+        def list_page(archived_state, cursor):
+            return app_server.call("thread/list", {"archived": archived_state, "cursor": cursor, "limit": 1,
+                                                   "sortKey": "updated_at", "sortDirection": "desc",
+                                                   "useStateDbOnly": False, "sourceKinds": SOURCE_KINDS,
+                                                   "modelProviders": []})
+        first_page = list_page(False, None)
+        if len(first_page.get("data", [])) != 1 or not first_page.get("nextCursor"):
+            raise RuntimeError("two active synthetic threads did not produce a paginated listing")
+        second_page = list_page(False, first_page["nextCursor"])
+        active_listed = {item.get("id") for item in first_page["data"] + second_page.get("data", [])}
+        if active_listed != active_ids:
+            raise RuntimeError("active synthetic thread pagination did not return both selected threads")
+        archived_page = list_page(True, None)
+        if {item.get("id") for item in archived_page.get("data", [])} != {archived_id}:
+            raise RuntimeError("nonempty archived synthetic thread scan did not return the selected archive")
+
+        turn_first = app_server.call("thread/turns/list", {"threadId": first_thread_id, "cursor": None, "limit": 1,
+                                                            "sortDirection": "asc", "itemsView": "full"})
+        if len(turn_first.get("data", [])) != 1 or not turn_first.get("nextCursor"):
+            raise RuntimeError("resumed synthetic thread did not produce a paginated turn listing")
+        turn_second = app_server.call("thread/turns/list", {"threadId": first_thread_id,
+                                                             "cursor": turn_first["nextCursor"], "limit": 1,
+                                                             "sortDirection": "asc", "itemsView": "full"})
+        turns = turn_first["data"] + turn_second.get("data", [])
+        if len(turns) != 2 or any(turn.get("itemsView") != "full" or not turn.get("items") for turn in turns):
+            raise RuntimeError("turn continuation did not return two full-view synthetic turns")
+        item_count = sum(len(turn.get("items", [])) for turn in turns)
+        first_turn_id = turns[0].get("id")
+        item_page = app_server.call("thread/items/list", {"threadId": first_thread_id,
+                                                            "turnId": first_turn_id, "cursor": None,
+                                                            "limit": 1, "sortDirection": "asc"})
+        if len(item_page.get("data", [])) != 1 or not item_page.get("nextCursor"):
+            raise RuntimeError("modern synthetic turn did not produce a paginated item listing")
+        next_item_page = app_server.call("thread/items/list", {"threadId": first_thread_id,
+                                                                "turnId": first_turn_id,
+                                                                "cursor": item_page["nextCursor"],
+                                                                "limit": 1, "sortDirection": "asc"})
+        if len(next_item_page.get("data", [])) != 1:
+            raise RuntimeError("modern synthetic item continuation did not return the next item")
         print(json.dumps({"status": "passed", "codex_version": CODEX_READER_VERSION,
-                          "listed_thread": True, "turns": len(turns["data"]), "items": item_count,
+                          "active_threads": len(active_listed), "archived_threads": 1,
+                          "continued_turns": len(turns), "full_view_items": item_count,
+                          "item_pages": 2,
                           "projection_schema": "accepted"}))
     finally:
         if app_server is not None:

@@ -25,7 +25,11 @@ projection yielded one thread, one turn and two messages. An independent
 collector-to-HTTP run then stored both observations with complete coverage,
 created a controlled project and captured its digest.
 
-These narrow binary checks do **not** establish macOS support, nonempty
-archived history, or actual multi-page binary cursors.
+The coordinator independently repeated the extended harness: two active
+threads across two listing pages, one nonempty archived listing, two turns
+across continuation, and two item pages all passed against the actual binary.
+
+These synthetic binary checks do **not** establish macOS support or
+compatibility with every real account history format.
 Those live checks remain unverified; fixture results are listed separately in
 `codex-reader.md`. Ticket 02 is not marked complete.
