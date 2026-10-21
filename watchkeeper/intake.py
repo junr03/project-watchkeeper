@@ -62,8 +62,10 @@ class Intake:
                 raise ValueError("invalid per-thread coverage record")
         captured = _iso(self.clock())
         inserted = 0
+        expired_replays_suppressed = 0
         with self.db.connect() as c:
             c.execute("BEGIN IMMEDIATE")
+            has_tombstones = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='expired_observations'").fetchone() is not None
             for item in items:
                 keys = ("thread_id", "message_id", "revision", "source_timestamp", "locator", "text")
                 if not isinstance(item, dict) or set(item) != set(keys):
@@ -80,13 +82,18 @@ class Intake:
                     raise ValueError("source_timestamp must include a timezone")
                 if any(ord(ch) < 32 or ord(ch) == 127 for ch in source + item["thread_id"] + item["message_id"]):
                     raise ValueError("source and observation IDs cannot contain control characters")
+                oid = hashlib.sha256(f"{source}\0{item['thread_id']}\0{item['message_id']}".encode()).hexdigest()
+                if has_tombstones and c.execute(
+                        "SELECT 1 FROM expired_observations WHERE observation_id=? AND revision=?",
+                        (oid, item["revision"])).fetchone():
+                    expired_replays_suppressed += 1
+                    continue
                 excluded_source = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='excluded_sources'").fetchone()
                 if excluded_source and c.execute("SELECT 1 FROM excluded_sources WHERE source_id=?", (source,)).fetchone():
                     continue
                 excluded_thread = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='excluded_threads'").fetchone()
                 if excluded_thread and c.execute("SELECT 1 FROM excluded_threads WHERE source_id=? AND thread_id=?", (source, item["thread_id"])).fetchone():
                     continue
-                oid = hashlib.sha256(f"{source}\0{item['thread_id']}\0{item['message_id']}".encode()).hexdigest()
                 prior = c.execute("SELECT revision FROM observations WHERE observation_id=?", (oid,)).fetchone()
                 if prior is None:
                     c.execute("INSERT INTO observations VALUES(?,?,?,?,?,?,?,?,?)",
@@ -121,7 +128,8 @@ class Intake:
                     (source, record["thread_id"], record["completeness"], record["activity"], captured))
             c.commit()
             persisted = c.execute("SELECT cursor FROM sources WHERE source_id=?", (source,)).fetchone()["cursor"]
-        return {"source_id": source, "stored": inserted, "cursor": persisted, "captured_at": captured}
+        return {"source_id": source, "stored": inserted, "cursor": persisted, "captured_at": captured,
+                "expired_replays_suppressed": expired_replays_suppressed}
 
     @staticmethod
     def _coverage(value):
