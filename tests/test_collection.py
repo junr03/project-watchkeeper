@@ -68,7 +68,9 @@ class FakeCodexRpc:
 
 class TestClock:
     def __init__(self):
-        self.value = datetime(2026, 10, 21, 16, 0, 0, tzinfo=timezone.utc)
+        # Keep the clock after the newest source event in the public fixture;
+        # policy correctly rejects evidence timestamps from the future.
+        self.value = datetime(2026, 10, 21, 18, 0, 0, tzinfo=timezone.utc)
     def __call__(self):
         value = self.value
         self.value += timedelta(seconds=1)
@@ -173,6 +175,10 @@ class CollectionHttpTest(unittest.TestCase):
                     "next_action": "Ask a local nursery to confirm planting dates",
                     "reasoning": "The draft exists and the captured messages leave its plans untested.",
                     "evidence_refs": [o["observation_id"] for o in revised if o["thread_id"].startswith("fixture-thread-garden-")]}
+        proposal["evidence_revisions"] = {o["observation_id"]: o["revision"] for o in revised
+                                           if o["thread_id"].startswith("fixture-thread-garden-")}
+        proposal["status"] = "explicit_request"
+        proposal["grouping_confidence"] = "strong"
         self.request("/api/reviews", payload=proposal, token=self.config.reviewer_token)
         self.assertIn("Ask a local nursery", str(self.request("/api/state", basic=("alice", "private-pass"))))
         self.assertTrue(list(self.config.email_dir.glob("*.eml")) == [])
