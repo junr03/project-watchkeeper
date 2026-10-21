@@ -19,6 +19,35 @@ def iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+def _reviewable_retained_evidence(c, evidence_items):
+    """Select only the latest expired revision when its raw row is gone.
+
+    Project records keep full evidence provenance. This narrower view is what
+    review and reviewer-input may use after raw retention removes a row.
+    """
+    candidates = {}
+    for item in evidence_items:
+        if isinstance(item, dict) and isinstance(item.get("observation_id"), str):
+            candidates[item["observation_id"]] = item
+    if not candidates:
+        return []
+    latest = {}
+    current_ids = set()
+    ids = list(candidates)
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        marks = ",".join("?" for _ in chunk)
+        for row in c.execute(f"""SELECT e.observation_id,e.revision FROM expired_observations e
+            WHERE e.observation_id IN ({marks}) AND e.rowid=(SELECT e2.rowid FROM expired_observations e2
+                WHERE e2.observation_id=e.observation_id
+                ORDER BY e2.expired_at DESC,e2.first_captured_at DESC,e2.rowid DESC LIMIT 1)""", chunk):
+            latest[row["observation_id"]] = row["revision"]
+        current_ids.update(row[0] for row in c.execute(
+            f"SELECT observation_id FROM observations WHERE observation_id IN ({marks})", chunk))
+    return [item for oid, item in candidates.items()
+            if latest.get(oid) == item.get("revision") and oid not in current_ids]
+
+
 class WatchkeeperService:
     def __init__(self, database: Database, email_sink, clock=None, stale_after_seconds=3600,
                  inferred_after_days=3, transcript_retention_days=30, privacy_journal=None,
@@ -140,13 +169,13 @@ class WatchkeeperService:
             # observations cannot be smuggled back into a review proposal.
             obs = {oid: row for oid, row in all_obs.items()
                    if not self._excluded(c, row["source_id"], row["thread_id"])}
-            expired_ids = {r[0] for r in c.execute("SELECT observation_id FROM expired_observations")}
             retained_projects = c.execute("""SELECT evidence_json FROM projects WHERE disposition='open'
                 AND archived=0 AND (snooze_until IS NULL OR snooze_until<=?)""", (iso(self.clock()),)).fetchall()
             for project in retained_projects:
-                for item in json.loads(project["evidence_json"]):
+                eligible_retained = _reviewable_retained_evidence(c, json.loads(project["evidence_json"]))
+                for item in eligible_retained:
                     oid = item.get("observation_id")
-                    if (oid in expired_ids and oid not in obs and
+                    if (oid not in obs and
                             not self._excluded(c, item.get("source_id"), item.get("thread_id"))):
                         obs[oid] = item
             assessment = validate_proposal(proposal, obs, now=self.clock(), sources=sources,
@@ -313,7 +342,9 @@ class WatchkeeperService:
         for row in projects:
             project = dict(row)
             evidence = json.loads(project.pop("evidence_json"))
-            retained = [item for item in evidence if item.get("observation_id") not in visible and
+            with self.db.connect() as c:
+                retained = _reviewable_retained_evidence(c, evidence)
+            retained = [item for item in retained if item.get("observation_id") not in visible and
                         not self._excluded_from_context(item)]
             project["retained_evidence"] = retained
             active_projects.append(project)
