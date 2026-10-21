@@ -18,7 +18,7 @@ image.
 
 ```sh
 docker compose config --quiet
-docker compose up --build -d
+docker compose up --build -d --wait
 curl -fsS http://127.0.0.1:8765/readyz
 ```
 
