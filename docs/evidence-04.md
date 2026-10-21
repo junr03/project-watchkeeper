@@ -18,3 +18,7 @@ The reusable combined browser harness is delivered with ticket 07.
 Intake exclusion enforcement is supplied by ticket 02 in this review stack.
 Archive does not alter retention settings; actual expiry on archived records
 remains unverified until ticket 05. No private sources or accounts were used.
+
+After integrating ticket 02, the coordinator independently passed all 18
+combined tests. A direct post-scenario storage check additionally confirmed
+new source-excluded and thread-excluded message IDs were never persisted.

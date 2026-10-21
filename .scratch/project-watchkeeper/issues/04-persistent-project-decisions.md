@@ -12,7 +12,7 @@
 
 **Execution:** Implementation checkpoint verified — Luna `decisions_luna`; coordinator independently ran eight application/migration tests and real Chromium controls. Archive/retention acceptance remains pending ticket 05.
 
-**Branch:** `jnr/04-project-decisions`; isolated worktree; review stack will include ticket 02 for intake-side exclusion enforcement.
+**Branch:** `jnr/04-project-decisions`; isolated worktree; review stack includes ticket 02 for intake-side exclusion enforcement.
 
 **Work breakdown:**
 
