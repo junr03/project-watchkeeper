@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from watchkeeper.collector import CODEX_READER_VERSION, JsonLineAppServer, SOURCE_KINDS
+from watchkeeper.codex_mirror import prepare_codex_mirror
 
 
 class FakeResponsesHandler(BaseHTTPRequestHandler):
@@ -96,6 +97,7 @@ def main():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     app_server = None
+    prepared_mirror = None
     try:
         clean_env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL") if key in os.environ}
         clean_env.update({"HOME": str(root), "CODEX_HOME": str(root), "XDG_CONFIG_HOME": str(root / "config"),
@@ -129,10 +131,10 @@ def main():
         if len(transcripts) != 3 or first_thread_id not in transcripts:
             raise RuntimeError("synthetic Codex exec did not produce the expected three threads")
 
-        mirror = root / "mirror"
-        sessions = mirror / "sessions"
+        selected_source = root / "selected-source"
+        sessions = selected_source / "sessions"
         sessions.mkdir(parents=True)
-        archived = mirror / "archived_sessions"
+        archived = selected_source / "archived_sessions"
         archived.mkdir()
         thread_ids = sorted(transcripts)
         active_ids = set(thread_ids[:2])
@@ -140,20 +142,23 @@ def main():
         for thread_id, transcript in transcripts.items():
             destination_dir = sessions if thread_id in active_ids else archived
             shutil.copyfile(transcript, destination_dir / transcript.name)
-        (mirror / ".watchkeeper-reader-state").write_text(json.dumps({
-            "format": "watchkeeper-codex-reader-state-v1", "credentials_excluded": True, "transcripts_only": True,
-        }), encoding="utf-8")
+        # These generated decoys demonstrate that preparation ignores root
+        # config and general state without opening or copying them.
+        (selected_source / "config.toml").write_text("synthetic config sentinel")
+        (selected_source / "state_5.sqlite").write_bytes(b"synthetic general-state sentinel")
 
         source_db = root / "thread_history_1.sqlite"
         if not source_db.is_file():
             raise RuntimeError("synthetic Codex exec did not create thread_history_1.sqlite")
         source = sqlite3.connect(source_db.resolve().as_uri() + "?mode=ro", uri=True)
         try:
-            with sqlite3.connect(mirror / "thread_history_1.sqlite") as snapshot:
+            with sqlite3.connect(selected_source / "thread_history_1.sqlite") as snapshot:
                 source.backup(snapshot)
         finally:
             source.close()
 
+        prepared_mirror = prepare_codex_mirror(selected_source)
+        mirror = prepared_mirror.__enter__()
         app_server = JsonLineAppServer.launch(args.codex_binary, mirror)
         def list_page(archived_state, cursor):
             return app_server.call("thread/list", {"archived": archived_state, "cursor": cursor, "limit": 1,
@@ -202,6 +207,8 @@ def main():
     finally:
         if app_server is not None:
             app_server.close()
+        if prepared_mirror is not None:
+            prepared_mirror.__exit__(None, None, None)
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)

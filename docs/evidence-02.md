@@ -33,3 +33,10 @@ These synthetic binary checks do **not** establish macOS support or
 compatibility with every real account history format.
 Those live checks remain unverified; fixture results are listed separately in
 `codex-reader.md`. Ticket 02 is not marked complete.
+
+The coordinator independently passed all 22 tests after adding opt-in source
+preparation, then repeated the actual-binary harness through the preparation
+path with the same pagination/archive results. Synthetic WAL tests verify that
+source database, WAL and SHM hashes remain unchanged. Preparation stages only
+selected history, bounds file reads, rejects inconsistent snapshots, preserves
+the intake cursor on failure, and removes the temporary mirror after the run.
