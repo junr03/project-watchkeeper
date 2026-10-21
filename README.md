@@ -9,6 +9,7 @@ supporting implementation guidance. There is no runnable service yet.
 The first slice monitors Codex threads only. Other sources are later expansion.
 
 - [Feature specification](.scratch/project-watchkeeper/spec.md)
+- [Codex-only implementation tickets](.scratch/project-watchkeeper/README.md)
 - [Implementation guide and acceptance checks](docs/implementation.md)
 - [Electricpeak deployment handoff](docs/deployment-electricpeak.md)
 - [Integration evidence and limitations](docs/integration-evidence.md)
