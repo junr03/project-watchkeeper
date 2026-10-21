@@ -1,4 +1,4 @@
-"""Bounded one-shot OpenClaw review runner.
+"""Bounded scheduled OpenClaw review worker.
 
 This process reads only the reviewer broker socket, invokes a fixed OpenClaw
 command, and submits structured proposals back through that same narrow
@@ -15,6 +15,7 @@ import resource
 import shutil
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 import subprocess
@@ -28,6 +29,7 @@ class ReviewFailure(StrEnum):
     AUTHENTICATION = "authentication"
     UNAVAILABLE = "unavailable"
     INVALID_OUTPUT = "invalid_output"
+    PROTOCOL = "protocol"
 
 
 class ReviewError(RuntimeError):
@@ -268,10 +270,53 @@ class OpenClawReviewer:
         self.timeout_seconds = max(10, min(300, int(timeout_seconds)))
         self.max_input_chars = max(1024, min(240_000, int(max_input_chars)))
         self.run_root = run_root
+        self.active_job = None
+        self.retry_after_seconds = 0
 
-    def run(self) -> dict[str, Any]:
-        _require_subscription_profile(self.command, self.config_path, self.entrypoint)
-        read = self.broker.request("GET", "/api/review-input")
+    def report_failure(self, error):
+        """Report only a typed failure; the broker never receives error text."""
+        if self.active_job is not None:
+            job = self.active_job
+            self.broker.request("POST", f"/api/reviewer/jobs/{job['run_id']}/fail",
+                                {"lease_token": job["lease_token"], "failure_kind": error.failure.value})
+            self.active_job = None
+
+    def run(self, *, scheduled=False) -> dict[str, Any]:
+        if scheduled:
+            try:
+                health = self.broker.request("GET", "/api/reviewer/health")
+                delay = health.value.get("retry_after_seconds", 0) if health.status == 200 else 0
+                self.retry_after_seconds = max(0, min(21600, int(delay)))
+            except ReviewError:
+                # Health backoff is an optimization; OAuth preflight must still
+                # be independently diagnosable when the broker is unavailable.
+                self.retry_after_seconds = 0
+            if self.retry_after_seconds:
+                return {"status": "backoff", "retry_after_seconds": self.retry_after_seconds}
+        try:
+            # Keep the OAuth/profile check before claiming or reading evidence.
+            _require_subscription_profile(self.command, self.config_path, self.entrypoint)
+        except ReviewError as exc:
+            if scheduled:
+                try:
+                    reported = self.broker.request("POST", "/api/reviewer/health",
+                                                   {"failure_kind": exc.failure.value})
+                    delay = reported.value.get("retry_after_seconds", 0)
+                    self.retry_after_seconds = max(0, min(21600, int(delay))) if reported.status == 200 else 0
+                except (ReviewError, ValueError, TypeError):
+                    self.retry_after_seconds = 0
+            raise
+        self.retry_after_seconds = 0
+        if scheduled:
+            claimed = self.broker.request("POST", "/api/reviewer/jobs/claim", {})
+            if claimed.status != 200 or not isinstance(claimed.value.get("job"), dict):
+                if claimed.status == 200 and claimed.value.get("job") is None:
+                    return {"status": "idle", "proposals": 0}
+                raise ReviewError(ReviewFailure.UNAVAILABLE, "review job claim failed")
+            self.active_job = claimed.value["job"]
+            read = BrokerResponse(200, self.active_job["review_input"])
+        else:
+            read = self.broker.request("GET", "/api/review-input")
         if read.status in {401, 403}:
             raise ReviewError(ReviewFailure.AUTHENTICATION, "review broker authentication failed")
         if read.status != 200:
@@ -312,6 +357,15 @@ class OpenClawReviewer:
         except OSError as exc:
             raise ReviewError(ReviewFailure.UNAVAILABLE, "OpenClaw runtime could not be started") from exc
         proposals = _decode_output(completed.stdout, completed.stderr, completed.returncode)
+        if scheduled:
+            job = self.active_job
+            posted = self.broker.request("POST", f"/api/reviewer/jobs/{job['run_id']}/complete",
+                                         {"lease_token": job["lease_token"], "proposals": proposals})
+            if posted.status != 200 or posted.value.get("status") != "success" or posted.value.get("completed") is not True:
+                raise ReviewError(ReviewFailure.UNAVAILABLE,
+                                  "review job result was stale or not accepted")
+            self.active_job = None
+            return {"status": "success", "proposals": len(proposals)}
         stored = 0
         for proposal in proposals:
             posted = self.broker.request("POST", "/api/reviews", proposal)
@@ -330,23 +384,34 @@ def main() -> int:
         return 2
     socket_path = os.environ.get("WATCHKEEPER_REVIEWER_BROKER_SOCKET", "/run/watchkeeper/app.sock")
     client = ReviewerBrokerClient(socket_path, token)
-    try:
-        runner = OpenClawReviewer(client,
-            command="node",
-            config_path="/etc/watchkeeper/openclaw.json5",
-            model="openai/gpt-6-astra",
-            timeout_seconds=int(os.environ.get("WATCHKEEPER_REVIEW_TIMEOUT_SECONDS", "180")),
-            max_input_chars=int(os.environ.get("WATCHKEEPER_REVIEW_MAX_INPUT_CHARS", "240000")))
-        result = runner.run()
-    except ReviewError as exc:
-        print(json.dumps({"status": "failure", "failure": exc.failure.value}))
-        return {ReviewFailure.QUOTA: 3, ReviewFailure.AUTHENTICATION: 4,
-                ReviewFailure.UNAVAILABLE: 5, ReviewFailure.INVALID_OUTPUT: 6}[exc.failure]
-    except (ValueError, OSError):
-        print(json.dumps({"status": "failure", "failure": "unavailable"}))
-        return 5
-    print(json.dumps(result))
-    return 0
+    runner = OpenClawReviewer(client,
+        command="node",
+        config_path="/etc/watchkeeper/openclaw.json5",
+        model="openai/gpt-6-astra",
+        timeout_seconds=int(os.environ.get("WATCHKEEPER_REVIEW_TIMEOUT_SECONDS", "180")),
+        max_input_chars=int(os.environ.get("WATCHKEEPER_REVIEW_MAX_INPUT_CHARS", "240000")))
+    poll_seconds = max(5, min(300, int(os.environ.get("WATCHKEEPER_REVIEW_POLL_SECONDS", "30"))))
+    once = os.environ.get("WATCHKEEPER_REVIEW_ONCE", "0") == "1"
+    while True:
+        try:
+            result = runner.run(scheduled=True)
+            print(json.dumps(result))
+        except ReviewError as exc:
+            try:
+                runner.report_failure(exc)
+            except (ReviewError, OSError, ValueError):
+                pass
+            print(json.dumps({"status": "failure", "failure": exc.failure.value}))
+            if once:
+                return 4 if exc.failure == ReviewFailure.AUTHENTICATION else 3
+        except (ValueError, OSError):
+            print(json.dumps({"status": "failure", "failure": "unavailable"}))
+            if once:
+                return 3
+        sys.stdout.flush()
+        if once:
+            return 0
+        time.sleep(max(poll_seconds, runner.retry_after_seconds))
 
 
 if __name__ == "__main__":

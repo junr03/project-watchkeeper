@@ -187,13 +187,49 @@ def validate_proposal(payload: Any, stored_evidence: set[str] | Mapping[str, Any
         if progress_at > current:
             raise ProposalError("stored source evidence cannot be in the future")
         progress_dates.append(progress_at)
+    watermark_invalid = False
+    watermark_dates = []
+    newer_watermark = False
+    for source_id, thread_id in {(row["source_id"], row["thread_id"]) for row in evidence.values()}:
+        source = source_map.get(source_id, {})
+        thread_map = source.get("threads", {}) if isinstance(source, Mapping) else {}
+        thread = thread_map.get(thread_id, {}) if isinstance(thread_map, Mapping) else {}
+        watermark = thread.get("last_progress_at") if isinstance(thread, Mapping) else None
+        if watermark is None:
+            continue
+        try:
+            watermark_at = _date(watermark, "last_progress_at")
+            captured = _date(thread.get("last_progress_captured_at"), "last_progress_captured_at")
+            revision = thread.get("last_progress_revision")
+            if not isinstance(revision, str) or not revision or watermark_at > current or captured > current:
+                raise ProposalError("invalid or future source progress watermark")
+            watermark_dates.append(watermark_at)
+            thread_rows = [row for row in thread_evidence if row.get("source_id") == source_id and
+                           row.get("thread_id") == thread_id]
+            if thread_rows:
+                latest_row = max(thread_rows, key=lambda row: (
+                    _date(row.get("source_timestamp"), "source_timestamp"),
+                    _date(row.get("captured_at"), "captured_at")))
+                raw_at = _date(latest_row.get("source_timestamp"), "source_timestamp")
+                raw_captured = _date(latest_row.get("captured_at"), "captured_at")
+                if (watermark_at > raw_at or
+                        (watermark_at == raw_at and captured > raw_captured) or
+                        (revision != latest_row.get("revision") and captured > raw_captured)):
+                    newer_watermark = True
+        except (ProposalError, TypeError, ValueError):
+            watermark_invalid = True
+    progress_dates.extend(watermark_dates)
     latest_progress = max(progress_dates) if progress_dates else None
     canonical_progress = (latest_progress.isoformat(timespec="seconds").replace("+00:00", "Z")
                           if latest_progress else None)
     if trusted_active:
         reason = "active_work"
     elif status == "explicit_request":
-        if unavailable:
+        if watermark_invalid:
+            reason = "invalid_progress_watermark"
+        elif newer_watermark:
+            reason = "newer_progress_not_reviewed"
+        elif unavailable:
             reason = "source_unavailable"
         elif confidence == "uncertain":
             reason = "uncertain_grouping"
@@ -207,6 +243,10 @@ def validate_proposal(payload: Any, stored_evidence: set[str] | Mapping[str, Any
             reason = "missing_progress_evidence"
         elif unavailable:
             reason = "source_unavailable"
+        elif watermark_invalid:
+            reason = "invalid_progress_watermark"
+        elif newer_watermark:
+            reason = "newer_progress_not_reviewed"
         elif not coverage_complete:
             reason = "coverage_incomplete"
         else:

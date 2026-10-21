@@ -70,7 +70,12 @@ class _BrokerHandler(BaseHTTPRequestHandler):
         return bool(candidate and hmac.compare_digest(candidate, self.server.token))
 
     def do_GET(self):
-        if self.path != "/api/review-input":
+        if self.path == "/api/reviewer/health":
+            if not self._authorized():
+                self._reply(401, {"error": "unauthorized"})
+            else:
+                self._reply(200, self.app.service.scheduler.health_backoff_seconds("reviewer", "openclaw"))
+        elif self.path != "/api/review-input":
             self._reply(404, {"error": "not found"})
         elif not self._authorized():
             self._reply(401, {"error": "unauthorized"})
@@ -81,10 +86,6 @@ class _BrokerHandler(BaseHTTPRequestHandler):
                 self._reply(503, {"error": "review input unavailable"})
 
     def do_POST(self):
-        if self.path != "/api/reviews":
-            self.close_connection = True
-            self._reply(404, {"error": "not found"})
-            return
         if not self._authorized():
             self.close_connection = True
             self._reply(401, {"error": "unauthorized"})
@@ -95,7 +96,7 @@ class _BrokerHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._reply(400, {"error": "invalid content length"})
             return
-        if length <= 0 or length > MAX_REVIEW_BYTES:
+        if length < 0 or length > MAX_REVIEW_BYTES:
             self.close_connection = True
             self._reply(413, {"error": "review body exceeds broker limit"})
             return
@@ -103,10 +104,40 @@ class _BrokerHandler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length)
             if len(raw) != length:
                 raise ValueError("incomplete review body")
-            payload = json.loads(raw)
+            payload = json.loads(raw or b"{}")
             if not isinstance(payload, dict):
                 raise ValueError("JSON body must be an object")
-            result = self.server.proposal_submitter(payload)
+            path = self.path.split("?", 1)[0]
+            service = self.app.service
+            if path == "/api/reviewer/jobs/claim":
+                if payload:
+                    raise ValueError("claim does not accept fields")
+                result = {"job": service.claim_review_job()}
+            elif path == "/api/reviewer/health":
+                if set(payload) != {"failure_kind"} or payload["failure_kind"] not in {
+                        "quota", "authentication", "unavailable", "invalid_output", "protocol"}:
+                    raise ValueError("invalid typed reviewer health report")
+                import uuid
+                health = service.scheduler.record_failure("reviewer", "openclaw", payload["failure_kind"], uuid.uuid4().hex)
+                result = {"recorded": True, **health}
+            elif path.startswith("/api/reviewer/jobs/"):
+                parts = path.split("/")
+                if len(parts) != 6:
+                    self._reply(404, {"error": "not found"})
+                    return
+                run_id, action = parts[4], parts[5]
+                if action == "complete" and set(payload) == {"lease_token", "proposals"}:
+                    result = service.complete_review_job(run_id, payload["lease_token"], payload["proposals"])
+                elif action == "fail" and set(payload) == {"lease_token", "failure_kind"}:
+                    service.fail_review_job(run_id, payload["lease_token"], payload["failure_kind"])
+                    result = {"recorded": True}
+                else:
+                    raise ValueError("invalid reviewer job action payload")
+            elif path == "/api/reviews" and payload:
+                result = self.server.proposal_submitter(payload)
+            else:
+                self._reply(404, {"error": "not found"})
+                return
         except (ValueError, json.JSONDecodeError) as exc:
             self._reply(400, {"error": str(exc)[:300]})
         except Exception:
