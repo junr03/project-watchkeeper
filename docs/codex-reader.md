@@ -13,16 +13,16 @@ directory, an intake URL, a token file, and a private cursor file.
 | Thread listing | Controlled Linux legacy and modern synthetic session measured | `thread/list`, ordered by `updated_at` descending, `useStateDbOnly: false`, and `modelProviders: []` (all providers) only inside a disposable selected-history mirror |
 | Source kinds | Schema supported; live compatibility untested | Always supplies all inspected v2 kinds: `cli`, `vscode`, `exec`, `appServer`, `subAgent`, `subAgentReview`, `subAgentCompact`, `subAgentThreadSpawn`, `subAgentOther`, and `unknown` |
 | Active history | Schema supported; live compatibility untested | `archived: false` scan |
-| Archived history | Schema supported; live compatibility untested | Separate `archived: true` scan; coverage says complete only after it finishes |
-| Thread pagination | Implemented; multi-page binary compatibility unverified | Continues from opaque `nextCursor`; cursor advances only after the corresponding intake response acknowledges persistence |
-| Message pagination | Controlled legacy fixture and modern synthetic projection measured; modern multi-page compatibility unverified | Requests `thread/turns/list` with `itemsView: full`; turns and their available items continue by cursor. Large pages are split into intake batches below 900 KB; intermediate checkpoints stay at the page start until every chunk is acknowledged. A missing/non-full view or an empty turn result for a listed thread leaves coverage partial |
+| Archived history | Nonempty synthetic archive measured on Linux; account archive compatibility untested | Separate `archived: true` scan; coverage says complete only after it finishes |
+| Thread pagination | One-item multi-page synthetic listing measured on Linux | Continues from opaque `nextCursor`; cursor advances only after the corresponding intake response acknowledges persistence |
+| Message pagination | Two synthetic turns and two item pages measured on Linux; account history untested | Requests `thread/turns/list` with `itemsView: full`; turns and their available items continue by cursor. Large pages are split into intake batches below 900 KB; intermediate checkpoints stay at the page start until every chunk is acknowledged. A missing/non-full view or an empty turn result for a listed thread leaves coverage partial |
 | Revisions and replay | Supported | Message ID is stable within source and thread; the revision combines the source timestamp and a content digest. Identical revisions preserve capture time |
 | Current execution activity | Explicit thread status only | `active` and `idle` are recorded when Codex returns those exact status types. `notLoaded`, absent, or unrecognized status stays `unknown`; a completed turn does not imply idle |
 | Deep links | Unsupported | The UI receives a plain Codex thread/message locator, never an invented URL |
 | Attachments and non-text items | Partial | User and agent text items are retained. Other item types are not represented as messages; text beyond the intake limit marks thread coverage partial |
 | Codex Mac compatibility | Untested | The protocol schema is pinned and fixture-tested on Linux. A controlled macOS Codex 0.162.1 session is still required before claiming live compatibility |
 
-A controlled Linux run with Codex 0.162.1 successfully initialized, listed, read, and paginated a legacy synthetic transcript; its returned turn contained direct full-view `userMessage` and `agentMessage` items. A separate synthetic modern session created through a local fake Responses API showed that `thread/list` needs `modelProviders: []`, and that modern turn contents are projected into `thread_history_1.sqlite`. Copying only that database with SQLite's backup API into the disposable app-server home returned the full user and assistant items with timestamps. The modern path was also exercised through `CodexCollector`, actual HTTP intake, a controlled proposal, authenticated HTML state, and captured digest; two synthetic observations reached complete coverage. These checks used generated content and no account. Nonempty archived traversal, modern paginated rollout files, multi-page turn cursors, and Codex Mac compatibility remain unverified. The measurements establish a narrow Linux protocol path, not full compatibility.
+A controlled Linux run with Codex 0.162.1 successfully initialized, listed, read, and paginated a legacy synthetic transcript; its returned turn contained direct full-view `userMessage` and `agentMessage` items. The local fake Responses API harness creates three modern synthetic threads, resumes one into a second turn, and moves one selected transcript into the isolated archive mirror. It measured active one-item thread pagination, a nonempty archived listing, two-turn continuation, and two one-item `thread/items/list` pages. The harness also confirms `modelProviders: []` is needed and copies only the modern `thread_history_1.sqlite` projection into the disposable app-server home. The modern path was additionally exercised through `CodexCollector`, actual HTTP intake, a controlled proposal, authenticated HTML state, and captured digest; two synthetic observations reached complete coverage. These checks used generated content and no account. Real account archive compatibility, modern paginated rollout files, and Codex Mac compatibility remain unverified. The measurements establish narrow Linux protocol paths, not full compatibility.
 
 The app-server request allowlist is `initialize`, `initialized`, `thread/list`,
 `thread/read`, `thread/turns/list`, and `thread/items/list`. The current reader
@@ -96,7 +96,8 @@ Responses API; it does not read account files or contact a hosted model:
 python tests/codex-modern-compat.py --codex-binary /path/to/codex
 ```
 
-It emits only pass/fail and item counts, then deletes its temporary files.
+It emits only pass/fail and counts for thread, turn, and item pages, then
+deletes its temporary files.
 
 A mirror can contain private transcripts, so keep it outside the repository and
 restrict its permissions. The intake token is kept separately in a file with

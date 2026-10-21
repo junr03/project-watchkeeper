@@ -10,7 +10,7 @@
 
 **Status:** ready-for-agent
 
-**Execution:** Implemented; synthetic verification passed independently. Narrow Linux legacy binary flow verified; macOS/modern history compatibility remains unverified.
+**Execution:** Implemented; synthetic verification passed independently. Linux legacy and modern binary flows, synthetic archive and pagination verified; macOS compatibility remains unverified.
 
 **Branch:** `jnr/02-codex-collection`; isolated worktree, base ticket 01 (`e9edc33`, PR #2).
 
@@ -40,7 +40,7 @@
 
 ## Verification
 
-See `docs/evidence-02.md`: coordinator independently passed 12 tests and an
-actual Codex 0.162.1 Linux synthetic legacy transcript-to-page-to-digest flow.
-Mac, modern rollout, nonempty archived history and binary pagination checks
-remain unverified. No private account activation was attempted.
+See `docs/evidence-02.md`: coordinator independently passed 15 tests and actual Codex 0.162.1 Linux
+legacy/modern transcript-to-page-to-digest flows. The extended actual-binary
+harness also passed active listing, nonempty archived history, turn and item
+pagination. Mac and owner history compatibility remain unverified. No private account activation was attempted.
