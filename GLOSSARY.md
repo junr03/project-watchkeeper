@@ -56,3 +56,18 @@ A user decision to defer a project's attention items until a chosen time.
 
 **Exclusion**:
 A user decision to keep a conversation or source outside monitoring.
+
+**Completion**:
+The intended project outcome has been achieved; ending an agent turn does
+not by itself establish completion.
+
+**Abandonment**:
+A user decision to stop pursuing a project's intended outcome.
+
+**Deletion**:
+A user decision to remove a project's stored content and exclude its known
+threads from future imports until explicitly re-enabled.
+
+**Project register**:
+The user's monitored projects, their outcomes and supporting evidence,
+and the decisions governing their continued monitoring.

@@ -1,6 +1,6 @@
 # Project Watchkeeper
 
-Document status: Draft; design interview in progress.
+Document status: Draft; accepted decisions recorded, consolidated review pending.
 
 A self-hosted monitor that tracks unfinished projects across AI
 conversations and surfaces the next action that needs your attention.
@@ -59,9 +59,35 @@ Provide a small authenticated web page linked from the digest. It supports
 snoozing, marking complete, abandoning, excluding, and correcting project
 thread groupings. User decisions persist across reviews.
 
+The page is single-user and accessible only through the deployment's private
+network. On Electricpeak, route it through Envoy using the existing service
+exposure pattern. Authentication remains required; private reachability and
+reverse proxy routing alone do not establish the user's identity.
+
 Opening an email link only displays the page. State changes require an
 explicit authenticated action; link previews and email scanners must not
 change project state.
+
+Explicit user decisions take precedence over inferred state. Projects marked
+complete or abandoned stay that way until the user reopens them. Reassess
+snoozed projects when the snooze expires; a still-actionable result may then
+be notified again.
+
+Deleting a project removes its stored summaries and evidence and excludes
+its known threads from future imports until explicitly re-enabled. Retain
+only the minimal exclusion identifiers needed to prevent re-import. Source
+conversations remain untouched.
+
+### Proposed: reversible archive
+
+Archive hides a project from the active view and pauses its attention reviews
+and reminders without deleting its stored records or changing whether it is
+complete or abandoned. Restore returns it to its prior disposition and
+reassesses it when eligible. Ordinary transcript retention still applies;
+archive is not a permanent transcript backup. Known archived projects must
+not be rediscovered as new candidates merely because they are hidden.
+
+This archive behavior awaits the final shared-understanding confirmation.
 
 ## Attention rules and collection health
 
@@ -75,10 +101,23 @@ presented as waiting on the user. If visibility is insufficient to establish
 the current situation, represent that uncertainty rather than infer that the
 user is holding up the project.
 
+Automatically group threads only with strong supporting evidence. Leave
+uncertain matches and completion judgments as proposals on the control page;
+do not email them as established facts. An agent saying "done" does not prove
+the intended outcome is complete.
+
 Expired logins and persistent collection failures appear as separate,
 deduplicated collection notices in the daily digest. Ordinary laptop sleep
 marks observations as stale; it is not itself a collection failure or
 evidence that a project has stalled.
+
+## Review limits and recovery
+
+Run reviews daily by default. Process history incrementally within
+configurable work limits. Preserve checkpoints when subscription limits or
+login failures interrupt progress, and resume after capacity or access is
+restored. Persistent failures become collection notices. Never silently
+switch to paid model API access.
 
 ## Operating boundary
 
@@ -103,12 +142,12 @@ framework. Electricpeak owns its deployment-specific image selection,
 storage, secret provisioning, networking, and rollout. This documentation PR
 does not deploy a service or authorize account connections.
 
-## Decisions still to resolve
+## Implementation guidance and final review
 
-- Control-page access boundary.
-- Ambiguous cross-thread project matches and completion judgments.
-- Deletion and future re-import behavior.
-- Review limits, subscription exhaustion, and reconnection behavior.
-- Detailed acceptance scenarios and implementation sequence.
+See [the implementation guide](../../docs/implementation.md) for component
+boundaries, acceptance scenarios, delivery sequence, and activation gates.
 
-Resolve these before treating this spec as ready for implementation.
+The remaining product decision is the proposed archive behavior above. The
+consolidated scope also awaits the user's final shared-understanding check.
+This draft records design decisions; it does not authorize implementation,
+merging, connecting accounts, or deploying services.
