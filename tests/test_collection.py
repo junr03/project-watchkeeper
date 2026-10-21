@@ -5,6 +5,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
 import queue
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -13,7 +14,8 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from unittest.mock import patch
 
-from watchkeeper.collector import CodexCollector, JsonLineAppServer, READ_METHODS, ReaderFailure, _item_timestamp
+from watchkeeper.collector import (CodexCollector, JsonLineAppServer, READ_METHODS, ReaderFailure,
+                                   _item_timestamp, _validate_history_projection)
 from watchkeeper.config import Config
 from watchkeeper.db import Database
 from watchkeeper.delivery import FileEmailSink
@@ -36,6 +38,8 @@ class FakeCodexRpc:
         if method == "initialize":
             return {"userAgent": "Codex/0.162.1"}
         if method == "thread/list":
+            if params.get("modelProviders") != []:
+                raise AssertionError("Codex thread/list must explicitly include every model provider")
             archived = params["archived"]
             threads = [t for t in self.history["threads"] if t["archived"] is archived]
             cursor = params.get("cursor")
@@ -73,6 +77,53 @@ class TestClock:
         value = self.value
         self.value += timedelta(seconds=1)
         return value
+
+
+def make_history_projection(path, thread_id="fixture-thread-projection"):
+    """Build the narrow Codex 0.162.1 synthetic projection schema used in tests."""
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL,
+            installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, success BOOLEAN NOT NULL,
+            checksum BLOB NOT NULL, execution_time BIGINT NOT NULL);
+        CREATE TABLE thread_history_projection_state (thread_id TEXT PRIMARY KEY,
+            next_rollout_byte_offset INTEGER NOT NULL, next_rollout_ordinal INTEGER NOT NULL);
+        CREATE TABLE thread_items (thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, item_id TEXT NOT NULL,
+            rollout_ordinal INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, item_json TEXT NOT NULL,
+            item_type TEXT NOT NULL DEFAULT '', updated_at_ordinal INTEGER NOT NULL DEFAULT 0,
+            started_at_ms INTEGER, completed_at_ms INTEGER, PRIMARY KEY (thread_id, turn_id, item_id));
+        CREATE TABLE thread_realtime_items (thread_id TEXT NOT NULL, item_id TEXT NOT NULL,
+            rollout_ordinal INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, item_type TEXT NOT NULL,
+            item_json TEXT NOT NULL, PRIMARY KEY (thread_id, item_id));
+        CREATE TABLE thread_turns (thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, rollout_ordinal INTEGER NOT NULL,
+            status TEXT NOT NULL, error_json TEXT, started_at INTEGER, completed_at INTEGER, duration_ms INTEGER,
+            first_user_item_id TEXT, final_agent_item_id TEXT, rollout_byte_offset INTEGER,
+            rollout_end_ordinal INTEGER, rollout_end_byte_offset INTEGER, root_turn_id TEXT,
+            PRIMARY KEY (thread_id, turn_id));
+        CREATE INDEX idx_thread_items_by_turn_page ON thread_items(thread_id, turn_id, rollout_ordinal);
+        CREATE INDEX idx_thread_items_by_turn_updated_page ON thread_items(thread_id, turn_id, updated_at_ordinal);
+        CREATE UNIQUE INDEX idx_thread_items_page ON thread_items(thread_id, rollout_ordinal);
+        CREATE INDEX idx_thread_items_updated_page ON thread_items(thread_id, updated_at_ordinal);
+        CREATE INDEX idx_thread_items_user_messages ON thread_items(thread_id, rollout_ordinal) WHERE item_type = 'userMessage';
+        CREATE INDEX idx_thread_realtime_items_boundary ON thread_realtime_items(thread_id, rollout_ordinal)
+            WHERE item_type IN ('realtime_session_started', 'realtime_session_closed');
+        CREATE UNIQUE INDEX idx_thread_realtime_items_page ON thread_realtime_items(thread_id, rollout_ordinal);
+        CREATE INDEX idx_thread_turns_end_page ON thread_turns(thread_id, rollout_end_ordinal, turn_id)
+            WHERE rollout_end_ordinal IS NOT NULL;
+        CREATE UNIQUE INDEX idx_thread_turns_page ON thread_turns(thread_id, rollout_ordinal);
+        CREATE TRIGGER thread_realtime_items_projection_cleanup AFTER DELETE ON thread_history_projection_state
+        BEGIN DELETE FROM thread_realtime_items WHERE thread_id = OLD.thread_id; END;
+    """)
+    migrations = [(1, "thread history"), (2, "thread items item type"), (3, "turn rollout positions"),
+                  (4, "thread items updated at ordinal"), (5, "thread realtime items"), (6, "thread turn ends"),
+                  (7, "thread item lifecycle timestamps"), (8, "thread turn root")]
+    db.executemany("INSERT INTO _sqlx_migrations(version, description, success, checksum, execution_time) "
+                   "VALUES(?, ?, 1, X'00', 0)", migrations)
+    db.execute("INSERT INTO thread_history_projection_state VALUES(?, 0, 0)", (thread_id,))
+    db.execute("INSERT INTO thread_turns(thread_id, turn_id, rollout_ordinal, status) VALUES(?, 'turn-1', 1, 'completed')",
+               (thread_id,))
+    db.commit()
+    db.close()
 
 
 class CollectionHttpTest(unittest.TestCase):
@@ -135,8 +186,12 @@ class CollectionHttpTest(unittest.TestCase):
         return self.request("/api/state", basic=(self.config.ui_username, self.config.ui_password))["sources"][0]
 
     def test_collection_replay_revision_coverage_and_email_flow(self):
-        result = self.run_collect(self.collector(), "")
+        collector = self.collector()
+        result = self.run_collect(collector, "")
         self.assertEqual("complete", result["status"])
+        thread_list_calls = [params for method, params in collector.rpc.calls if method == "thread/list"]
+        self.assertTrue(thread_list_calls)
+        self.assertTrue(all(params.get("modelProviders") == [] for params in thread_list_calls))
         source = self.source_state()
         self.assertEqual("full", source["coverage"]["message_completeness"])
         self.assertTrue(source["coverage"]["archived_scanned"])
@@ -293,6 +348,68 @@ class CollectionHttpTest(unittest.TestCase):
                 JsonLineAppServer.launch("codex", self.source_dir, timeout=0.01)
         self.assertFalse(runtime_home.exists())
         self.assertFalse(process.running)
+
+    def test_history_projection_is_validated_and_copied_into_disposable_home(self):
+        marker = self.source_dir / ".watchkeeper-reader-state"
+        marker.write_text(json.dumps({"format": "watchkeeper-codex-reader-state-v1",
+                                      "credentials_excluded": True, "transcripts_only": True}))
+        sessions = self.source_dir / "sessions"
+        sessions.mkdir()
+        thread_id = "fixture-thread-projection"
+        (sessions / "synthetic.jsonl").write_text(json.dumps({"type": "session_meta",
+                                                               "payload": {"id": thread_id}}) + "\n")
+        projection = self.source_dir / "thread_history_1.sqlite"
+        make_history_projection(projection, thread_id)
+        _validate_history_projection(projection, {thread_id})
+
+        runtime_home = self.root / "runtime-projection"
+        runtime_home.mkdir()
+        process = type("Process", (), {"stdin": type("Input", (), {"write": lambda self, value: None,
+                                                                       "flush": lambda self: None})(),
+                                         "stdout": type("Output", (), {"readline": lambda self: ""})(),
+                                         "poll": lambda self: 0})()
+        def open_runtime(*args, **kwargs):
+            self.assertTrue((runtime_home / "thread_history_1.sqlite").is_file())
+            _validate_history_projection(runtime_home / "thread_history_1.sqlite", {thread_id})
+            return process
+        with patch("watchkeeper.collector.tempfile.mkdtemp", return_value=str(runtime_home)), \
+             patch("watchkeeper.collector.subprocess.run", return_value=type("Result", (), {"stdout": "codex-cli 0.162.1\n"})()), \
+             patch("watchkeeper.collector.subprocess.Popen", side_effect=open_runtime):
+            with self.assertRaises(RuntimeError):
+                JsonLineAppServer.launch("codex", self.source_dir)
+        self.assertFalse(runtime_home.exists())
+
+    def test_history_projection_rejects_unknown_thread_ids_objects_and_sidecars(self):
+        projection = self.source_dir / "thread_history_1.sqlite"
+        make_history_projection(projection)
+        with self.assertRaisesRegex(ValueError, "outside the selected transcript"):
+            _validate_history_projection(projection, {"different-thread"})
+        db = sqlite3.connect(projection)
+        try:
+            db.execute("CREATE VIEW unexpected AS SELECT 1")
+        finally:
+            db.close()
+        with self.assertRaisesRegex(ValueError, "table set|unsupported SQLite objects"):
+            _validate_history_projection(projection, {"fixture-thread-projection"})
+
+        projection.unlink()
+        make_history_projection(projection)
+        Path(str(projection) + "-wal").touch()
+        with self.assertRaisesRegex(ValueError, "standalone SQLite backup"):
+            _validate_history_projection(projection, {"fixture-thread-projection"})
+
+        Path(str(projection) + "-wal").unlink()
+        symlink = self.source_dir / "linked-history.sqlite"
+        symlink.symlink_to(projection)
+        with self.assertRaisesRegex(ValueError, "regular non-symlink"):
+            _validate_history_projection(symlink, {"fixture-thread-projection"})
+
+    def test_empty_turn_projection_for_listed_thread_is_partial(self):
+        history = deepcopy(self.history)
+        history["threads"][0]["turns"] = []
+        result = self.run_collect(self.collector(history), "")
+        self.assertEqual("partial", result["status"])
+        self.assertTrue(any("No turns were returned" in gap for gap in result["coverage"]["gaps"]))
 
     def test_reader_launch_cleans_temporary_state_when_copy_fails(self):
         marker = self.source_dir / ".watchkeeper-reader-state"
