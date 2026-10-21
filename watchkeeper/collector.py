@@ -780,7 +780,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Read-only collector for one explicitly enabled Codex reader state")
     parser.add_argument("--enable-codex", action="store_true", help="explicit opt-in required for collection")
     parser.add_argument("--source-id", required=True, help="stable installation identity")
-    parser.add_argument("--source-dir", required=True, help="isolated Codex reader state directory")
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--source-dir", help="already prepared isolated Codex reader state directory")
+    source_group.add_argument("--prepare-from-codex-dir", help="explicit Codex directory; copy selected history to a temporary private mirror")
     parser.add_argument("--intake-url", required=True, help="Watchkeeper POST /api/observations URL")
     parser.add_argument("--intake-token-file", required=True, help="file containing collector bearer token")
     parser.add_argument("--cursor-file", required=True, help="private local durable cursor file")
@@ -798,8 +800,6 @@ def main(argv=None):
         parser.error("intake token file is empty")
     cursor_path = Path(args.cursor_file).expanduser()
     cursor = cursor_path.read_text(encoding="utf-8") if cursor_path.exists() else ""
-    collector = CodexCollector(source_id=args.source_id, source_location=args.source_dir, enabled=True,
-                               binary=args.codex_binary, max_threads=args.max_threads, max_pages=args.max_pages)
 
     def post_batch(batch):
         request = urllib.request.Request(args.intake_url, data=json.dumps(batch).encode("utf-8"),
@@ -815,9 +815,49 @@ def main(argv=None):
         _save_cursor(cursor_path, result["cursor"])
         return result
 
-    result = collector.collect(cursor, post_batch)
-    print(json.dumps({k: v for k, v in result.items() if k != "cursor"}, sort_keys=True))
-    return 0
+    def collect_from(source_dir):
+        collector = CodexCollector(source_id=args.source_id, source_location=source_dir, enabled=True,
+                                   binary=args.codex_binary, max_threads=args.max_threads, max_pages=args.max_pages)
+        result = collector.collect(cursor, post_batch)
+        print(json.dumps({k: v for k, v in result.items() if k != "cursor"}, sort_keys=True))
+        return 0
+
+    if args.source_dir:
+        return collect_from(args.source_dir)
+
+    from .codex_mirror import MirrorPreparationError, prepare_codex_mirror
+    mirror_context = prepare_codex_mirror(args.prepare_from_codex_dir)
+    try:
+        mirror = mirror_context.__enter__()
+    except MirrorPreparationError as exc:
+        kind = exc.kind
+    except OSError:
+        kind = "unavailable"
+    except (sqlite3.Error, ValueError):
+        kind = "protocol"
+    else:
+        try:
+            return collect_from(mirror)
+        finally:
+            mirror_context.__exit__(None, None, None)
+
+    # Preparation failed before a reader was launched. Preserve the last
+    # acknowledged cursor while recording the typed failure through the same
+    # authenticated Watchkeeper intake endpoint.
+    failure_batch = {"source_id": args.source_id, "cursor": cursor, "available": False, "observations": [],
+                     "coverage": {"state": "partial", "threads_listed": 0, "threads_read": 0,
+                                  "messages_read": 0, "scan_limit": args.max_threads,
+                                  "archived_scanned": False, "message_completeness": "unknown",
+                                  "current_activity": "unknown", "gaps": ["Reader preparation failed"],
+                                  "source_version": CODEX_READER_VERSION, "failure": kind}}
+    reported = False
+    try:
+        post_batch(failure_batch)
+        reported = True
+    except Exception:
+        pass
+    print(json.dumps({"status": "failure", "failure": kind, "reported": reported}, sort_keys=True))
+    return 2
 
 
 if __name__ == "__main__":

@@ -40,7 +40,11 @@
 
 ## Verification
 
-See `docs/evidence-02.md`: coordinator independently passed 15 tests and actual Codex 0.162.1 Linux
+See `docs/evidence-02.md`: coordinator independently passed 22 tests and actual Codex 0.162.1 Linux
 legacy/modern transcript-to-page-to-digest flows. The extended actual-binary
 harness also passed active listing, nonempty archived history, turn and item
 pagination. Mac and owner history compatibility remain unverified. No private account activation was attempted.
+
+Opt-in source preparation is implemented and independently verified against
+synthetic source/WAL fixtures and the actual pinned binary. It never opens the
+source SQLite database, authentication or configuration files.
