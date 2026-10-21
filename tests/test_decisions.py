@@ -1,6 +1,7 @@
 """HTTP acceptance for durable user decisions and reviewer precedence."""
 
 import base64
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
 import re
@@ -84,7 +85,7 @@ class SchemaMigrationTest(unittest.TestCase):
                 c.execute("PRAGMA user_version=2")
             with self.assertRaises(ValueError):
                 Database(path)
-            with sqlite3.connect(path) as c:
+            with closing(sqlite3.connect(path)) as c:
                 self.assertEqual(2, c.execute("PRAGMA user_version").fetchone()[0])
                 self.assertIsNone(c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='project_threads'").fetchone())
 

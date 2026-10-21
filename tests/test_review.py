@@ -441,11 +441,11 @@ raise SystemExit(2)
         self.assertEqual(2, delivered["delivered"])
         emails = [message_from_bytes(path.read_bytes(), policy=default).get_content()
                   for path in self.config.email_dir.glob("*.eml")]
-        self.assertEqual(2, len(emails))
-        self.assertTrue(any("Choose the planting zones" in body for body in emails))
-        self.assertTrue(any("Review the index entries" in body for body in emails))
-        self.assertFalse(any("attacker@example.invalid" in body for body in emails))
-        self.assertFalse(any("supplier" in body.lower() for body in emails))
+        self.assertEqual(1, len(emails))
+        self.assertIn("Choose the planting zones", emails[0])
+        self.assertIn("Review the index entries", emails[0])
+        self.assertNotIn("attacker@example.invalid", emails[0])
+        self.assertNotIn("supplier", emails[0].lower())
 
         hostile = self._proposal({"project_id": "bad-recipient", "outcome": "No", "next_action": "No",
                                   "reasoning": "No", "status": "explicit_request"},

@@ -17,6 +17,14 @@ class Config:
     stale_after_seconds: int = 3600
     transcript_retention_days: int = 30
     privacy_journal: Path | None = None
+    inferred_after_days: int = 3
+    schedule_timezone: str = "UTC"
+    review_time: str = "08:00"
+    digest_time: str = "08:15"
+    review_window_limit: int = 100
+    review_window_bytes: int = 180000
+    review_windows_per_day: int = 4
+    scheduler_poll_seconds: int = 30
 
     def __post_init__(self):
         if not self.intake_token or not self.reviewer_token or self.intake_token == self.reviewer_token:
@@ -54,4 +62,12 @@ class Config:
             stale_after_seconds=int(os.environ.get("WATCHKEEPER_STALE_AFTER_SECONDS", "3600")),
             transcript_retention_days=int(os.environ.get("WATCHKEEPER_TRANSCRIPT_RETENTION_DAYS", "30")),
             privacy_journal=Path(os.environ["WATCHKEEPER_PRIVACY_JOURNAL"]) if os.environ.get("WATCHKEEPER_PRIVACY_JOURNAL") else None,
+            inferred_after_days=int(os.environ.get("WATCHKEEPER_INFERRED_AFTER_DAYS", "3")),
+            schedule_timezone=os.environ.get("WATCHKEEPER_SCHEDULE_TIMEZONE", "UTC"),
+            review_time=os.environ.get("WATCHKEEPER_REVIEW_TIME", "08:00"),
+            digest_time=os.environ.get("WATCHKEEPER_DIGEST_TIME", "08:15"),
+            review_window_limit=int(os.environ.get("WATCHKEEPER_REVIEW_WINDOW_LIMIT", "100")),
+            review_window_bytes=int(os.environ.get("WATCHKEEPER_REVIEW_WINDOW_BYTES", "180000")),
+            review_windows_per_day=int(os.environ.get("WATCHKEEPER_REVIEW_WINDOWS_PER_DAY", "4")),
+            scheduler_poll_seconds=int(os.environ.get("WATCHKEEPER_SCHEDULER_POLL_SECONDS", "30")),
         )

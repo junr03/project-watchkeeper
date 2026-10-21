@@ -118,16 +118,21 @@ class Handler(BaseHTTPRequestHandler):
             exclusions = "".join(self._exclusion_html(item) for item in state["excluded_threads"])
             exclusions += "".join(self._source_exclusion_html(source_id) for source_id in state["excluded_sources"])
             proposals = "".join(self._proposal_html(item) for item in state["proposals"])
+            notices = "".join(
+                f"<li>{html.escape(item['category'])} · {html.escape(item['subject'])}: "
+                f"{html.escape(item['failure_kind'])} ({item['occurrences']} failed attempts)</li>"
+                for item in state.get("monitoring", {}).get("open_notices", []))
             page = f"""<!doctype html><html><head><meta charset="utf-8"><title>Project Watchkeeper</title>
 <style>body{{font:16px system-ui;max-width:900px;margin:2rem auto;padding:0 1rem}}article{{border:1px solid #bbb;border-radius:8px;padding:1rem;margin:1rem 0}}small{{color:#555}}form{{display:inline-block;margin:.25rem}}</style></head><body>
 <h1>Project Watchkeeper</h1><p>Observed sources</p><ul>{sources or '<li>None yet</li>'}</ul>
+<h2>Collection and review notices</h2><ul>{notices or '<li>None.</li>'}</ul>
 <h2>Pending proposals</h2>{proposals or '<p>None.</p>'}<h2>Exclusions</h2>{exclusions or '<p>None.</p>'}
 <p><a href="/">Active projects</a> · <a href="/?view=archived">Archived projects</a></p>
 <h2>{'Archived projects' if archived_view else 'Active projects'}</h2>{projects or '<p>No projects in this view.</p>'}<button id="deliver" type="button">Capture pending digest</button><script>
 const csrf={json.dumps(csrf)};
 document.querySelectorAll('form[data-action]').forEach(form=>form.addEventListener('submit',async ev=>{{ev.preventDefault();const data={{}};if(form.elements.until)data.until=new Date(form.elements.until.value).toISOString();if(form.elements.project_id)data.project_id=form.elements.project_id.value;if(form.elements.from_project_id)data.from_project_id=form.elements.from_project_id.value;if(form.elements.new_project_id&&form.elements.new_project_id.value.trim())data.project_id=form.elements.new_project_id.value.trim();const r=await fetch(form.dataset.action,{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},body:JSON.stringify(data)}});if(r.ok)location.reload();else alert('Action was not saved.');}}));
 document.querySelectorAll('form[data-delete-project]').forEach(form=>form.addEventListener('submit',async ev=>{{ev.preventDefault();const id=form.dataset.deleteProject;const encoded=encodeURIComponent(id);const p=await fetch('/api/projects/'+encoded+'/deletion-preview');if(!p.ok){{alert('Could not load deletion preview.');return;}}const impact=await p.json();const threads=impact.affected_threads.map(t=>t.source_id+' / '+t.thread_id).join(', ')||'none';const projects=impact.affected_projects.join(', ')||'none';const message='Delete '+id+'? This deletes the selected project, excludes '+impact.affected_threads.length+' known conversation(s): '+threads+'. It also clears derived summaries for directly affected shared projects: '+projects+'. It removes '+impact.pending_notifications+' queued notification(s) and '+impact.captured_emails+' captured email(s). Unrelated conversations remain.';if(!window.confirm(message))return;const r=await fetch('/api/projects/'+encoded+'/delete',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},body:JSON.stringify({{confirm:true,impact_token:impact.impact_token}})}});if(r.ok)location.reload();else if(r.status===409)alert('Shared conversations changed. Reload and review the updated impact.');else alert('Deletion was not completed.');}}));
-document.getElementById('deliver').addEventListener('click',async()=>{{const r=await fetch('/api/deliver',{{method:'POST',headers:{{'X-CSRF-Token':csrf,'Content-Length':'0'}}}});const d=await r.json();alert(r.ok?'Captured '+d.delivered+' digest email(s).':(d.error||'Delivery failed'));}});
+document.getElementById('deliver').addEventListener('click',async()=>{{const r=await fetch('/api/deliver',{{method:'POST',headers:{{'X-CSRF-Token':csrf,'Content-Length':'0'}}}});const d=await r.json();alert(r.ok?'Captured '+d.emails+' digest email(s) covering '+d.delivered+' finding(s).':(d.error||'Delivery failed'));}});
 </script></body></html>"""
             self._html(page, csrf)
             return

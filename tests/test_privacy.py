@@ -109,9 +109,7 @@ class PrivacyAcceptanceTest(unittest.TestCase):
         self._ingest([("t-extra", f"m{i}", "1", "2026-10-21T15:01:00Z", f"extra {i}")
                       for i in range(501)], "c2")
         review_input = self.service.review_input()
-        self.assertTrue(review_input["coverage"]["observations_truncated"])
-        project_input = next(p for p in review_input["projects"] if p["project_id"] == "open-item")
-        self.assertEqual([], project_input["retained_evidence"])
+        self.assertTrue(review_input["coverage"]["backlog_remaining"])
         self.assertNotIn(old_ref, {item["observation_id"] for item in review_input["observations"]})
 
         # The active row advances to revision 2 and then expires. The project
@@ -122,9 +120,7 @@ class PrivacyAcceptanceTest(unittest.TestCase):
         state_project = next(p for p in self.service.state()["projects"] if p["project_id"] == "open-item")
         self.assertEqual("1", state_project["evidence"][0]["revision"])
         review_input = self.service.review_input()
-        project_input = next(p for p in review_input["projects"] if p["project_id"] == "open-item")
         self.assertEqual([], review_input["observations"])
-        self.assertEqual([], project_input["retained_evidence"])
         with self.assertRaises(ValueError):
             self._review("open-item", [old_ref])
 

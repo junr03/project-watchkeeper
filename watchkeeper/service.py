@@ -1,16 +1,28 @@
 """Application behavior; dependencies are injectable at external boundaries."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
 import uuid
+import threading
+from functools import wraps
 
 from .db import Database
-from .delivery import fingerprint
+from .delivery import DeliveryNotAccepted, fingerprint
 from .intake import Intake
 from .policy import validate_proposal
 from .privacy import PrivacyManager
+from .evidence import install_reviewable_observations
+from .scheduler import MonitoringScheduler
+
+
+def _serialized(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._mutation_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
 
 
 def iso(value: datetime) -> str:
@@ -19,51 +31,35 @@ def iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
-def _reviewable_retained_evidence(c, evidence_items):
-    """Select only the latest expired revision when its raw row is gone.
-
-    Project records keep full evidence provenance. This narrower view is what
-    review and reviewer-input may use after raw retention removes a row.
-    """
-    candidates = {}
-    for item in evidence_items:
-        if isinstance(item, dict) and isinstance(item.get("observation_id"), str):
-            candidates[item["observation_id"]] = item
-    if not candidates:
-        return []
-    latest = {}
-    current_ids = set()
-    ids = list(candidates)
-    for start in range(0, len(ids), 500):
-        chunk = ids[start:start + 500]
-        marks = ",".join("?" for _ in chunk)
-        for row in c.execute(f"""SELECT e.observation_id,e.revision FROM expired_observations e
-            WHERE e.observation_id IN ({marks}) AND e.rowid=(SELECT e2.rowid FROM expired_observations e2
-                WHERE e2.observation_id=e.observation_id
-                ORDER BY e2.expired_at DESC,e2.first_captured_at DESC,e2.rowid DESC LIMIT 1)""", chunk):
-            latest[row["observation_id"]] = row["revision"]
-        current_ids.update(row[0] for row in c.execute(
-            f"SELECT observation_id FROM observations WHERE observation_id IN ({marks})", chunk))
-    return [item for oid, item in candidates.items()
-            if latest.get(oid) == item.get("revision") and oid not in current_ids]
-
-
 class WatchkeeperService:
-    def __init__(self, database: Database, email_sink, clock=None, stale_after_seconds=3600,
-                 inferred_after_days=3, transcript_retention_days=30, privacy_journal=None,
-                 privacy_purge_hooks=None, captured_email_dir=None):
+    def __init__(self, database: Database, email_sink, clock=None, stale_after_seconds=3600, inferred_after_days=3,
+                 transcript_retention_days=30, privacy_journal=None,
+                 privacy_purge_hooks=None, captured_email_dir=None, *, schedule_timezone="UTC", review_time="08:00", digest_time="08:15",
+                 review_window_limit=100, review_windows_per_day=4, review_lease_seconds=300,
+                 review_window_bytes=180_000):
         self.db = database
         self.email_sink = email_sink
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.stale_after_seconds = stale_after_seconds
         self.inferred_after_days = inferred_after_days
         self.intake = Intake(database, self.clock, stale_after_seconds)
+        self._mutation_lock = threading.RLock()
+        self.scheduler = MonitoringScheduler(database, self.clock, timezone=schedule_timezone,
+                                             review_time=review_time, digest_time=digest_time,
+                                             window_limit=review_window_limit,
+                                             windows_per_day=review_windows_per_day,
+                                             lease_seconds=review_lease_seconds,
+                                             window_byte_limit=review_window_bytes)
+        with self.db.connect() as c:
+            c.execute("CREATE TABLE IF NOT EXISTS project_assessment_guards (project_id TEXT PRIMARY KEY, guard_json TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            install_reviewable_observations(c)
         self.privacy = PrivacyManager(database,
             privacy_journal or f"{database.path}.privacy.jsonl", captured_email_dir,
-            transcript_retention_days, self.clock, purge_hooks=privacy_purge_hooks)
+            transcript_retention_days, self.clock, purge_hooks=[self.privacy_purge_hook, *(privacy_purge_hooks or [])])
         self.privacy.replay()
         self.privacy.expire()
 
+    @_serialized
     def ingest(self, batch: dict) -> dict:
         self.privacy.expire()
         required = {"source_id", "cursor", "available", "observations"}
@@ -81,15 +77,25 @@ class WatchkeeperService:
         self.privacy.refresh_watermarks()
         result["expired_replays_suppressed"] = suppressed + result.get("expired_replays_suppressed", 0)
         result["excluded_observations_skipped"] = excluded
+        coverage = batch.get("coverage", {}) if isinstance(batch, dict) else {}
+        failure = coverage.get("failure", "none") if isinstance(coverage, dict) else "none"
+        source_id = batch.get("source_id", "unknown") if isinstance(batch, dict) else "unknown"
+        if failure != "none":
+            self.scheduler.record_failure("source", source_id, failure, uuid.uuid4().hex)
+        else:
+            self.scheduler.recover("source", source_id)
         return result
 
+    @_serialized
     def expire_retention(self):
         """Public maintenance hook for the later daily scheduler."""
         return self.privacy.expire()
 
+    @_serialized
     def deletion_preview(self, project_id):
         return self.privacy.preview(project_id)
 
+    @_serialized
     def delete_project(self, project_id, impact_token, *, confirmed):
         return self.privacy.delete_project(project_id, impact_token, confirmed=confirmed)
 
@@ -124,7 +130,7 @@ class WatchkeeperService:
             if not isinstance(supplied_threads, dict):
                 supplied_threads = {}
             with self.db.connect() as c:
-                thread_ids = {r[0] for r in c.execute("SELECT thread_id FROM observations WHERE source_id=? UNION "
+                thread_ids = {r[0] for r in c.execute("SELECT thread_id FROM reviewable_observations WHERE source_id=? UNION "
                                                        "SELECT thread_id FROM thread_progress_watermarks WHERE source_id=?",
                                                        (source_id, source_id))}
                 thread_ids.update(supplied_threads)
@@ -158,26 +164,25 @@ class WatchkeeperService:
             normalized[source_id] = item
         return normalized
 
-    def review(self, proposal: dict) -> dict:
+    @_serialized
+    def review(self, proposal: dict, *, _incomplete_threads=()) -> dict:
         self.privacy.expire()
         with self.db.connect() as c:
             c.execute("BEGIN IMMEDIATE")
-            rows = c.execute("SELECT * FROM observations").fetchall()
+            rows = c.execute("SELECT * FROM reviewable_observations").fetchall()
             all_obs = {row["observation_id"]: dict(row) for row in rows}
             sources = self._source_context()
+            for source_id, thread_id in _incomplete_threads:
+                source = sources.get(source_id)
+                if isinstance(source, dict):
+                    thread = source.setdefault("threads", {}).setdefault(thread_id, {})
+                    thread["coverage_complete"] = False
+                    thread["completeness"] = "partial"
+                    thread["gaps"] = list(thread.get("gaps", [])) + ["leased review window did not contain full thread context"]
             # Exclusions are enforced here as well as at intake, so already stored
             # observations cannot be smuggled back into a review proposal.
             obs = {oid: row for oid, row in all_obs.items()
                    if not self._excluded(c, row["source_id"], row["thread_id"])}
-            retained_projects = c.execute("""SELECT evidence_json FROM projects WHERE disposition='open'
-                AND archived=0 AND (snooze_until IS NULL OR snooze_until<=?)""", (iso(self.clock()),)).fetchall()
-            for project in retained_projects:
-                eligible_retained = _reviewable_retained_evidence(c, json.loads(project["evidence_json"]))
-                for item in eligible_retained:
-                    oid = item.get("observation_id")
-                    if (oid not in obs and
-                            not self._excluded(c, item.get("source_id"), item.get("thread_id"))):
-                        obs[oid] = item
             assessment = validate_proposal(proposal, obs, now=self.clock(), sources=sources,
                                            inferred_after_days=self.inferred_after_days,
                                            source_stale_after_seconds=self.stale_after_seconds)
@@ -278,6 +283,18 @@ class WatchkeeperService:
                            assessment.get("grouping_confidence", previous["grouping_confidence"]),
                            assessment.get("last_progress_at", previous["last_progress_at"]), now, project_id))
 
+            if kind == "attention" and eligible and not (archived or locked or snoozed):
+                pairs = sorted({(row["source_id"], row["thread_id"]) for row in evidence_rows})
+                guard = {}
+                for source_id, thread_id in pairs:
+                    thread_rows = c.execute("SELECT observation_id,revision FROM reviewable_observations WHERE source_id=? AND thread_id=? ORDER BY observation_id,revision",
+                                            (source_id, thread_id)).fetchall()
+                    digest = hashlib.sha256(json.dumps([(r["observation_id"], r["revision"]) for r in thread_rows],
+                                                       separators=(",", ":")).encode()).hexdigest()
+                    guard[f"{source_id}\0{thread_id}"] = digest
+                c.execute("INSERT INTO project_assessment_guards VALUES(?,?,?) ON CONFLICT(project_id) DO UPDATE SET guard_json=excluded.guard_json,updated_at=excluded.updated_at",
+                          (project_id, json.dumps(guard, sort_keys=True), now))
+
             # Claim threads only when this is an actionable, stable grouping.
             # Existing ownership can be changed only through an authenticated user action.
             if kind == "attention" and eligible and not archived and not locked:
@@ -297,6 +314,12 @@ class WatchkeeperService:
                     c.execute("INSERT INTO outbox VALUES(?,?,?,?,?,NULL)",
                               (delivery_id, project_id, delivery_fp, now, "pending"))
                     delivery_created = True
+                else:
+                    status = c.execute("SELECT status FROM outbox WHERE delivery_id=?", (existing["delivery_id"],)).fetchone()[0]
+                    if status == "cancelled":
+                        c.execute("UPDATE outbox SET status='pending',created_at=?,delivered_at=NULL WHERE delivery_id=?",
+                                  (now, existing["delivery_id"]))
+                        delivery_created = True
             c.commit()
         return {"project_id": project_id, "status": "stored", "kind": kind,
                 "eligible": eligible, "eligibility_reason": reason or None,
@@ -314,13 +337,28 @@ class WatchkeeperService:
                    project_id, assessment["outcome"], assessment["next_action"], self.db.json(evidence),
                    assessment.get("status", "uncertain_grouping"), assessment.get("grouping_confidence", "uncertain"), reason))
 
-    def review_input(self) -> dict:
-        """Return observations eligible for review and a secret-free register view."""
+    @_serialized
+    def review_input(self, *, cursor=None, limit=500, byte_limit=180_000) -> dict:
+        """Return bounded raw/retained evidence and a secret-free register view."""
+        self.privacy.expire()
         sources = self._source_context()
         with self.db.connect() as c:
+            cursor_clause = ""
+            parameters = [iso(self.clock())]
+            if cursor is not None:
+                if (not isinstance(cursor, dict) or set(cursor) != {"source_timestamp", "captured_at", "observation_id"} or
+                        any(not isinstance(cursor[k], str) for k in cursor)):
+                    raise ValueError("invalid review cursor")
+                cursor_clause = " AND (julianday(o.source_timestamp) < julianday(?) OR (julianday(o.source_timestamp)=julianday(?) AND (o.captured_at < ? OR (o.captured_at=? AND o.observation_id<?))))"
+                parameters.extend([cursor["source_timestamp"], cursor["source_timestamp"],
+                                   cursor["captured_at"], cursor["captured_at"], cursor["observation_id"]])
+            if type(limit) is not int or not 1 <= limit <= 500:
+                raise ValueError("review window limit must be between 1 and 500")
+            if type(byte_limit) is not int or not 180_000 <= byte_limit <= 220_000:
+                raise ValueError("review window byte limit must be between 180000 and 220000")
             rows = c.execute("""SELECT DISTINCT o.observation_id,o.source_id,o.thread_id,o.message_id,o.revision,
                 o.source_timestamp,o.captured_at,o.locator,o.text
-                FROM observations o LEFT JOIN project_threads t ON
+                FROM reviewable_observations o LEFT JOIN project_threads t ON
                   t.source_id=o.source_id AND t.thread_id=o.thread_id
                 WHERE NOT EXISTS (SELECT 1 FROM excluded_sources x WHERE x.source_id=o.source_id)
                   AND NOT EXISTS (SELECT 1 FROM excluded_threads x WHERE x.source_id=o.source_id AND x.thread_id=o.thread_id)
@@ -328,66 +366,468 @@ class WatchkeeperService:
                        JOIN projects p ON p.project_id=live_t.project_id
                        WHERE live_t.source_id=o.source_id AND live_t.thread_id=o.thread_id
                          AND p.disposition='open' AND p.archived=0
-                         AND (p.snooze_until IS NULL OR p.snooze_until<=?)))
-                ORDER BY o.captured_at DESC LIMIT 501""", (iso(self.clock()),)).fetchall()
+                         AND (p.snooze_until IS NULL OR p.snooze_until<=?)))""" + cursor_clause +
+                " ORDER BY julianday(o.source_timestamp) DESC,o.captured_at DESC,o.observation_id DESC LIMIT ?",
+                (*parameters, limit + 1)).fetchall()
             projects = c.execute("""SELECT project_id,outcome,next_action,disposition,snooze_until,archived,
-                assessment_kind,eligible,eligibility_reason,updated_at,evidence_json FROM projects WHERE disposition='open'
-                AND archived=0 AND (snooze_until IS NULL OR snooze_until<=?) ORDER BY project_id""",
+                assessment_kind,eligible,eligibility_reason,updated_at FROM projects WHERE disposition='open'
+                AND archived=0 AND (snooze_until IS NULL OR snooze_until<=?) ORDER BY project_id LIMIT 5""",
                 (iso(self.clock()),)).fetchall()
-            proposals = c.execute("SELECT proposal_id,requested_project_id,outcome,next_action,reasoning,evidence_json,status,grouping_confidence,reason,created_at FROM review_proposals ORDER BY created_at DESC LIMIT 100").fetchall()
-        has_more = len(rows) > 500
-        rows = rows[:500]
-        visible = {row["observation_id"] for row in rows}
-        active_projects = []
-        for row in projects:
-            project = dict(row)
-            evidence = json.loads(project.pop("evidence_json"))
-            with self.db.connect() as c:
-                retained = _reviewable_retained_evidence(c, evidence)
-            retained = [item for item in retained if item.get("observation_id") not in visible and
-                        not self._excluded_from_context(item)]
-            project["retained_evidence"] = retained
-            active_projects.append(project)
-            for item in retained:
-                if len(rows) >= 500:
-                    has_more = True
-                    continue
-                rows.append(item)
-                visible.add(item.get("observation_id"))
-        return {"observations": [dict(row) for row in rows], "projects": active_projects,
-                "proposals": [{**{k: v for k, v in dict(row).items() if k != "evidence_json"},
-                               "evidence": json.loads(row["evidence_json"])} for row in proposals],
-                "sources": sources, "current_time": iso(self.clock()),
-                "coverage": {"observation_limit": 500, "observations_truncated": has_more,
-                             "next_before": rows[-1]["captured_at"] if has_more and rows else None}}
+            proposals = c.execute("SELECT proposal_id,requested_project_id,outcome,next_action,status,grouping_confidence,reason,created_at FROM review_proposals ORDER BY created_at DESC LIMIT 5").fetchall()
+        has_more = len(rows) > limit
+        seeds = [dict(row) for row in rows[:limit]]
+        project_values = [{k: (v[:120] if isinstance(v, str) else v) for k, v in dict(row).items()}
+                          for row in projects]
+        proposal_values = [{k: (row[k][:120] if isinstance(row[k], str) else row[k])
+                            for k in row.keys()} for row in proposals]
 
-    def _excluded_from_context(self, evidence):
-        with self.db.connect() as c:
-            return self._excluded(c, evidence.get("source_id"), evidence.get("thread_id"))
+        def compact_sources(selected_rows):
+            result = {}
+            for source_id, thread_id in sorted({(r["source_id"], r["thread_id"]) for r in selected_rows}):
+                source = sources.get(source_id, {})
+                coverage = source.get("coverage", {}) if isinstance(source, dict) else {}
+                thread = source.get("threads", {}).get(thread_id, {}) if isinstance(source, dict) else {}
+                entry = result.setdefault(source_id, {
+                    "available": source.get("available") is True,
+                    "freshness": source.get("freshness", "unknown"),
+                    "last_seen_at": source.get("last_seen_at"),
+                    "coverage": {**{k: coverage.get(k) for k in ("state", "message_completeness", "archived_scanned", "current_activity")},
+                                 "gaps": [str(gap)[:160] for gap in (coverage.get("gaps") or [])[:3]]},
+                    "threads": {}})
+                entry["threads"][thread_id] = {k: thread.get(k) for k in (
+                    "coverage_complete", "completeness", "activity", "active",
+                    "last_progress_at", "last_progress_revision", "last_progress_captured_at")}
+                entry["threads"][thread_id]["gaps"] = [str(gap)[:160] for gap in (thread.get("gaps") or [])[:3]]
+                if entry["threads"][thread_id].get("coverage_complete") is not True:
+                    entry["coverage"]["gaps"] = (entry["coverage"].get("gaps") or []) + [
+                        f"{thread_id}: {entry['threads'][thread_id]['gaps'][0] if entry['threads'][thread_id]['gaps'] else 'partial thread context'}"]
+            for entry in result.values():
+                if "gaps" not in entry["coverage"]:
+                    entry["coverage"]["gaps"] = []
+            return result
 
-    def deliver_pending(self) -> dict:
-        """Deliver pending outbox rows through the configured fixed-recipient sink."""
+        # Primary rows advance the cursor. Full context for a small thread is
+        # expanded within the same row/byte budget, even when its messages are
+        # interleaved with other threads. Older expanded context never moves
+        # the primary cursor backwards.
+        selected = []
+        partial_pairs = set()
+        processed_pairs = set()
+        cache = {}
+        nested_budget = limit * 3
+        last_seed = None
+        stopped_early = False
+
+        def mark_partial(pair, reason="bounded review window contains only part of this thread"):
+            partial_pairs.add(pair)
+            thread = sources.get(pair[0], {}).get("threads", {}).get(pair[1], {})
+            if isinstance(thread, dict):
+                thread["coverage_complete"] = False
+                thread["completeness"] = "partial"
+                thread["gaps"] = [reason]
+
+        def payload_for(candidate_rows, cursor_row, more):
+            cursor_value = ({"source_timestamp": cursor_row["source_timestamp"],
+                             "captured_at": cursor_row["captured_at"],
+                             "observation_id": cursor_row["observation_id"]} if more and cursor_row else None)
+            return {"observations": candidate_rows, "projects": project_values, "proposals": proposal_values,
+                    "sources": compact_sources(candidate_rows), "current_time": iso(self.clock()),
+                    "coverage": {"observation_limit": limit, "observation_byte_limit": byte_limit,
+                                 "observations_truncated": False, "backlog_remaining": more,
+                                 "next_cursor": cursor_value,
+                                 "next_before": cursor_row["captured_at"] if more and cursor_row else None}}
+
+        for index, seed in enumerate(seeds):
+            pair = (seed["source_id"], seed["thread_id"])
+            if pair in processed_pairs:
+                if seed["observation_id"] not in {row["observation_id"] for row in selected}:
+                    candidate = selected + [seed]
+                    candidate.sort(key=lambda row: (datetime.fromisoformat(row["source_timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc),
+                                                    row["captured_at"], row["observation_id"]), reverse=True)
+                    more = has_more or index < len(seeds) - 1
+                    payload = payload_for(candidate, seed, more)
+                    if len(candidate) > limit or len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > byte_limit:
+                        stopped_early = True
+                        break
+                    selected = candidate
+                last_seed = seed
+                if len(selected) >= limit and index < len(seeds) - 1:
+                    stopped_early = True
+                    break
+                continue
+            processed_pairs.add(pair)
+            if pair not in cache:
+                if nested_budget <= 0:
+                    mark_partial(pair, "bounded review window history-read budget reached")
+                    additions = [seed] if seed["observation_id"] not in {row["observation_id"] for row in selected} else []
+                    candidate = selected + additions
+                    candidate.sort(key=lambda row: (datetime.fromisoformat(row["source_timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc),
+                                                    row["captured_at"], row["observation_id"]), reverse=True)
+                    candidate_fits = (len(candidate) <= limit and len(json.dumps(payload_for(
+                        candidate, seed, has_more or index < len(seeds) - 1),
+                        ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= byte_limit)
+                    if candidate_fits:
+                        selected = candidate
+                        last_seed = seed
+                    else:
+                        stopped_early = True
+                        break
+                    stopped_early = has_more or index < len(seeds) - 1
+                    break
+                fetch_limit = min(limit + 1, nested_budget)
+                with self.db.connect() as c:
+                    thread_rows = [dict(row) for row in c.execute(
+                        "SELECT observation_id,source_id,thread_id,message_id,revision,source_timestamp,captured_at,locator,text FROM reviewable_observations WHERE source_id=? AND thread_id=? ORDER BY julianday(source_timestamp) DESC,captured_at DESC,observation_id DESC LIMIT ?",
+                        (*pair, fetch_limit)).fetchall()]
+                nested_budget -= len(thread_rows)
+                complete_thread = len(thread_rows) <= limit and len(thread_rows) < fetch_limit
+                cache[pair] = (thread_rows, complete_thread)
+            thread_rows, full_thread_known = cache[pair]
+            already = {row["observation_id"] for row in selected}
+            additions = [row for row in thread_rows if row["observation_id"] not in already]
+            can_expand = full_thread_known and len(selected) + len(additions) <= limit
+            if not can_expand:
+                additions = [seed] if seed["observation_id"] not in already else []
+                mark_partial(pair)
+            candidate = selected + additions
+            candidate.sort(key=lambda row: (datetime.fromisoformat(row["source_timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc),
+                                            row["captured_at"], row["observation_id"]), reverse=True)
+            more = has_more or index < len(seeds) - 1 or index == len(seeds) - 1 and len(rows) > limit
+            payload = payload_for(candidate, seed, more)
+            if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > byte_limit:
+                # If full context does not fit the byte budget, keep one seed
+                # and explicitly mark this thread partial to preserve progress.
+                fallback = [seed] if seed["observation_id"] not in already else []
+                mark_partial(pair, "bounded review window byte budget contains only part of this thread")
+                candidate = selected + fallback
+                candidate.sort(key=lambda row: (datetime.fromisoformat(row["source_timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc),
+                                                row["captured_at"], row["observation_id"]), reverse=True)
+                fallback_more = has_more or index < len(seeds) - 1
+                payload = payload_for(candidate, seed, fallback_more)
+                if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > byte_limit:
+                    if not selected:
+                        raise ValueError("review window context exceeds configured byte limit")
+                    stopped_early = True
+                    break
+                stopped_early = has_more or index < len(seeds) - 1
+            selected = candidate
+            last_seed = seed
+            if len(selected) >= limit and index < len(seeds) - 1:
+                stopped_early = True
+                break
+            if stopped_early:
+                break
+        if not selected and seeds:
+            raise ValueError("review window context exceeds configured byte limit")
+        for source_id, thread_id in partial_pairs:
+            thread = sources.get(source_id, {}).get("threads", {}).get(thread_id, {})
+            if isinstance(thread, dict):
+                thread["coverage_complete"] = False
+                thread["completeness"] = "partial"
+                thread["gaps"] = ["bounded review window contains only part of this thread"]
+        has_more = has_more or stopped_early
+        next_cursor = ({"source_timestamp": last_seed["source_timestamp"],
+                        "captured_at": last_seed["captured_at"], "observation_id": last_seed["observation_id"]}
+                       if has_more and last_seed else None)
+        result = {"observations": selected, "projects": project_values, "proposals": proposal_values,
+                  "sources": compact_sources(selected), "current_time": iso(self.clock()),
+                  "coverage": {"observation_limit": limit, "observation_byte_limit": byte_limit,
+                               "observations_truncated": False, "backlog_remaining": has_more,
+                               "next_cursor": next_cursor,
+                               "next_before": last_seed["captured_at"] if has_more and last_seed else None}}
+        encoded_size = lambda: len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        context_trimmed = False
+        while encoded_size() > byte_limit and proposal_values:
+            proposal_values.pop()
+            context_trimmed = True
+        while encoded_size() > byte_limit and project_values:
+            project_values.pop()
+            context_trimmed = True
+        if context_trimmed:
+            result["coverage"]["register_context_truncated"] = True
+        if encoded_size() > byte_limit:
+            for source in result["sources"].values():
+                if source["coverage"].get("gaps"):
+                    source["coverage"]["gaps"] = ["source coverage has reported gaps"]
+                for thread in source["threads"].values():
+                    if thread.get("coverage_complete") is not True:
+                        thread["gaps"] = ["partial thread context"]
+        if encoded_size() > byte_limit:
+            raise ValueError("bounded review metadata exceeds configured byte limit")
+        return result
+
+    @_serialized
+    def claim_review_job(self):
+        return self.scheduler.claim(lambda **kw: self.review_input(**kw))
+
+    @_serialized
+    def complete_review_job(self, run_id, lease_token, proposals):
         self.privacy.expire()
+        if not isinstance(proposals, list) or len(proposals) > 50:
+            raise ValueError("job result must contain at most 50 proposals")
+        now = self.clock()
+        current_sources = self._source_context()
         with self.db.connect() as c:
-            rows = c.execute("SELECT * FROM outbox WHERE status='pending' ORDER BY created_at,delivery_id").fetchall()
-        delivered = 0
-        for row in rows:
+            c.execute("BEGIN IMMEDIATE")
+            job = self.scheduler.validate_lease(c, run_id, lease_token, now)
+            if job is None:
+                c.rollback()
+                return {"status": "stale", "reason": "review lease expired or was replaced"}
+            snapshot = json.loads(job["snapshot_json"] or "{}")
+            revisions = snapshot.get("revisions", {}) if isinstance(snapshot, dict) else {}
+            allowed_refs = set(revisions)
+            current = {row["observation_id"]: row["revision"] for row in c.execute(
+                "SELECT observation_id,revision FROM reviewable_observations").fetchall()}
+            if any(current.get(observation_id) != value.get("revision")
+                   for observation_id, value in revisions.items() if isinstance(value, dict)):
+                c.execute("UPDATE monitoring_runs SET status='retry',snapshot_json=NULL,lease_token=NULL,lease_until=NULL,updated_at=? WHERE run_id=?",
+                          (iso(now), run_id))
+                c.commit()
+                return {"status": "stale", "reason": "evidence changed while review was running"}
+            for pair_key, guard in snapshot.get("thread_guard", {}).items():
+                source_id, thread_id = pair_key.split("\0", 1)
+                thread_rows = c.execute("SELECT observation_id,revision FROM reviewable_observations WHERE source_id=? AND thread_id=? ORDER BY observation_id,revision",
+                                        (source_id, thread_id)).fetchall()
+                latest = c.execute("SELECT COUNT(*) AS n,MAX(captured_at) AS captured,MAX(source_timestamp) AS source_time FROM reviewable_observations WHERE source_id=? AND thread_id=?",
+                                   (source_id, thread_id)).fetchone()
+                digest = hashlib.sha256(json.dumps([(r["observation_id"], r["revision"]) for r in thread_rows],
+                                                   separators=(",", ":")).encode()).hexdigest()
+                if (digest != guard.get("fingerprint") or latest["n"] != guard.get("count") or latest["captured"] != guard.get("captured_at") or
+                        latest["source_time"] != guard.get("source_timestamp")):
+                    c.execute("UPDATE monitoring_runs SET status='retry',snapshot_json=NULL,lease_token=NULL,lease_until=NULL,updated_at=? WHERE run_id=?",
+                              (iso(now), run_id))
+                    c.commit()
+                    return {"status": "stale", "reason": "thread evidence changed while review was running"}
+                thread = current_sources.get(source_id, {}).get("threads", {}).get(thread_id, {})
+                if any(thread.get(key) != guard.get(snapshot_key) for key, snapshot_key in (
+                        ("last_progress_at", "watermark_at"),
+                        ("last_progress_revision", "watermark_revision"),
+                        ("last_progress_captured_at", "watermark_captured_at"))):
+                    c.execute("UPDATE monitoring_runs SET status='retry',snapshot_json=NULL,lease_token=NULL,lease_until=NULL,updated_at=? WHERE run_id=?",
+                              (iso(now), run_id))
+                    c.commit()
+                    return {"status": "stale", "reason": "trusted thread progress changed while review was running"}
+            if any(not isinstance(proposal, dict) or
+                   not isinstance(proposal.get("evidence_refs"), list) or
+                   not set(proposal["evidence_refs"]).issubset(allowed_refs) for proposal in proposals):
+                c.rollback()
+                return {"status": "stale", "reason": "review result referenced evidence outside its leased window"}
+            c.execute("UPDATE monitoring_runs SET lease_until=?,updated_at=? WHERE run_id=? AND lease_token=?",
+                      (iso(now + timedelta(seconds=self.scheduler.lease_seconds)), iso(now), run_id, lease_token))
+            c.commit()
+        results = [self.review(proposal, _incomplete_threads=snapshot.get("partial_threads", []))
+                   for proposal in proposals]
+        # review() validates each referenced revision and current user decision;
+        # the mutation lock prevents another service mutation during this method.
+        completed = self.scheduler.complete(run_id, lease_token, self.clock(),
+                                             snapshot.get("next_cursor"),
+                                             has_more=snapshot.get("has_more") is True)
+        return {"status": "success" if completed else "stale", "proposals": results,
+                "completed": completed}
+
+    def fail_review_job(self, run_id, lease_token, failure_kind):
+        self.scheduler.fail(run_id, lease_token, failure_kind)
+
+    def _delivery_is_current(self, c, project, now, sources):
+        if (project is None or project["disposition"] != "open" or project["archived"] or
+                not project["eligible"] or project["assessment_kind"] != "attention" or
+                (project["snooze_until"] is not None and project["snooze_until"] > now)):
+            return False
+        evidence = json.loads(project["evidence_json"])
+        saved_guard_row = c.execute("SELECT guard_json FROM project_assessment_guards WHERE project_id=?",
+                                    (project["project_id"],)).fetchone()
+        if saved_guard_row is None:
+            return False
+        saved_guard = json.loads(saved_guard_row["guard_json"])
+        by_thread = {}
+        for item in evidence:
+            source_id, thread_id = item["source_id"], item["thread_id"]
+            if c.execute("SELECT 1 FROM excluded_sources WHERE source_id=?", (source_id,)).fetchone() or c.execute(
+                    "SELECT 1 FROM excluded_threads WHERE source_id=? AND thread_id=?", (source_id, thread_id)).fetchone():
+                return False
+            current = c.execute("SELECT revision FROM reviewable_observations WHERE observation_id=?", (item["observation_id"],)).fetchone()
+            if current is None or current["revision"] != item["revision"]:
+                return False
+            source = sources.get(source_id)
+            if not isinstance(source, dict) or source.get("available") is not True or source.get("freshness") != "fresh":
+                return False
+            thread = source.get("threads", {}).get(thread_id, {})
+            if not isinstance(thread, dict) or thread.get("active") is True:
+                return False
+            by_thread.setdefault((source_id, thread_id), []).append(item)
+        for (source_id, thread_id), rows in by_thread.items():
+            key = f"{source_id}\0{thread_id}"
+            current_rows = c.execute("SELECT observation_id,revision,source_timestamp,captured_at FROM reviewable_observations WHERE source_id=? AND thread_id=? ORDER BY observation_id,revision",
+                                     (source_id, thread_id)).fetchall()
+            current_digest = hashlib.sha256(json.dumps([(r["observation_id"], r["revision"]) for r in current_rows],
+                                                        separators=(",", ":")).encode()).hexdigest()
+            if saved_guard.get(key) != current_digest:
+                return False
+            source = sources[source_id]
+            thread = source.get("threads", {}).get(thread_id, {})
+            watermark = thread.get("last_progress_at")
+            if watermark:
+                try:
+                    watermark_at = datetime.fromisoformat(watermark.replace("Z", "+00:00"))
+                    watermark_capture = datetime.fromisoformat(thread["last_progress_captured_at"].replace("Z", "+00:00"))
+                    raw = max(current_rows, key=lambda item: (
+                        datetime.fromisoformat(item["source_timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc),
+                        datetime.fromisoformat(item["captured_at"].replace("Z", "+00:00")).astimezone(timezone.utc)))
+                    raw_source_at = datetime.fromisoformat(raw["source_timestamp"].replace("Z", "+00:00"))
+                    raw_capture = datetime.fromisoformat(raw["captured_at"].replace("Z", "+00:00"))
+                    if (watermark_at > raw_source_at or
+                            (watermark_at == raw_source_at and watermark_capture > raw_capture) or
+                            (thread.get("last_progress_revision") != raw["revision"] and watermark_capture > raw_capture)):
+                        return False
+                except (ValueError, TypeError, KeyError):
+                    return False
+        return True
+
+    @_serialized
+    def deliver_pending(self) -> dict:
+        """Deliver one digest for the current eligible queue and open notices."""
+        self.privacy.expire()
+        now = iso(self.clock())
+        sources = self._source_context()
+        with self.db.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            batch = c.execute("SELECT * FROM delivery_batches WHERE status IN ('sending','retryable') ORDER BY created_at LIMIT 1").fetchone()
+            retrying_batch = batch is not None
+            if batch is not None and batch["retry_after"] and batch["retry_after"] > now:
+                c.commit()
+                return {"delivered": 0, "emails": 0, "notices": 0, "status": "retry_deferred"}
+            if batch is not None and batch["status"] == "sending" and not getattr(self.email_sink, "idempotent_acceptance", False):
+                delivery_ids = json.loads(batch["delivery_ids_json"])
+                c.execute("UPDATE delivery_batches SET status='ambiguous',updated_at=? WHERE batch_id=?", (now, batch["batch_id"]))
+                if delivery_ids:
+                    c.executemany("UPDATE outbox SET status='ambiguous' WHERE delivery_id=? AND status='sending'",
+                                  [(delivery_id,) for delivery_id in delivery_ids])
+                c.execute("UPDATE outbox_attempts SET result='ambiguous' WHERE result='started' AND delivery_id IN (SELECT value FROM json_each(?))",
+                          (json.dumps(delivery_ids),))
+                c.commit()
+                return {"delivered": 0, "emails": 0, "notices": 0, "status": "ambiguous"}
+            if batch is None:
+                delivery_ids = []
+                for row in c.execute("SELECT * FROM outbox WHERE status='pending' ORDER BY created_at,delivery_id").fetchall():
+                    project = c.execute("SELECT * FROM projects WHERE project_id=?", (row["project_id"],)).fetchone()
+                    if self._delivery_is_current(c, project, now, sources):
+                        delivery_ids.append(row["delivery_id"])
+                    else:
+                        c.execute("UPDATE outbox SET status='cancelled' WHERE delivery_id=? AND status='pending'",
+                                  (row["delivery_id"],))
+                notice_ids = [row["incident_id"] for row in c.execute(
+                    """SELECT incident_id FROM health_incidents h WHERE status='open' AND occurrences>=2
+                       AND notified_at IS NULL AND NOT EXISTS (
+                         SELECT 1 FROM delivery_batches b, json_each(b.notice_ids_json) n
+                         WHERE b.status='ambiguous' AND n.value=h.incident_id)
+                       ORDER BY first_seen,incident_id""").fetchall()]
+                if not delivery_ids and not notice_ids:
+                    c.commit()
+                    return {"delivered": 0, "emails": 0, "notices": 0}
+                membership = sorted(delivery_ids + notice_ids)
+                digest_id = hashlib.sha256(("watchkeeper-digest\0" + "\0".join(membership)).encode()).hexdigest()
+                batch_id = uuid.uuid4().hex
+                c.execute("INSERT INTO delivery_batches(batch_id,digest_id,delivery_ids_json,notice_ids_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                          (batch_id, digest_id, json.dumps(delivery_ids), json.dumps(notice_ids), "sending", now, now))
+                c.executemany("UPDATE outbox SET status='sending' WHERE delivery_id=? AND status='pending'",
+                              [(delivery_id,) for delivery_id in delivery_ids])
+                for delivery_id in delivery_ids:
+                    next_attempt = c.execute("SELECT COALESCE(MAX(attempt_number),0)+1 FROM outbox_attempts WHERE delivery_id=?",
+                                             (delivery_id,)).fetchone()[0]
+                    c.execute("INSERT INTO outbox_attempts VALUES(?,?,?,?,?)",
+                              (uuid.uuid4().hex, delivery_id, next_attempt, "started", now))
+                batch = c.execute("SELECT * FROM delivery_batches WHERE batch_id=?", (batch_id,)).fetchone()
+            delivery_ids = json.loads(batch["delivery_ids_json"])
+            notice_ids = json.loads(batch["notice_ids_json"])
+            projects = []
+            membership_current = True
+            for delivery_id in delivery_ids:
+                row = c.execute("SELECT p.*,o.fingerprint AS delivery_fingerprint FROM outbox o JOIN projects p ON p.project_id=o.project_id WHERE o.delivery_id=?",
+                                (delivery_id,)).fetchone()
+                if row is not None:
+                    expected_fingerprint = row["fingerprint"]
+                    if row["snooze_until"] is not None:
+                        expected_fingerprint = hashlib.sha256(
+                            f"{expected_fingerprint}:{row['snooze_until']}".encode()).hexdigest()
+                    membership_current = membership_current and row["delivery_fingerprint"] == expected_fingerprint
+                    projects.append({"project_id": row["project_id"], "outcome": row["outcome"],
+                                     "next_action": row["next_action"], "reasoning": row["reasoning"],
+                                     "evidence": json.loads(row["evidence_json"])})
+                else:
+                    membership_current = False
+            notices = [dict(row) for row in c.execute(
+                "SELECT * FROM health_incidents WHERE incident_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(notice_ids),)).fetchall()]
+            retry_stale = (retrying_batch and (not membership_current or
+                any(not self._delivery_is_current(
+                    c, c.execute("SELECT * FROM projects WHERE project_id=?", (project["project_id"],)).fetchone(),
+                    now, sources) for project in projects) or
+                len(notices) != len(notice_ids) or any(n["status"] != "open" or n["notified_at"] is not None or
+                    n["occurrences"] < 2 for n in notices)))
+            if retry_stale:
+                accepted = bool(getattr(self.email_sink, "has_delivery", lambda _id: False)(batch["digest_id"]))
+                if accepted:
+                    c.execute("UPDATE delivery_batches SET status='accepted',updated_at=? WHERE batch_id=?",
+                              (now, batch["batch_id"]))
+                    c.executemany("UPDATE outbox SET status='delivered',delivered_at=? WHERE delivery_id=? AND status='sending'",
+                                  [(now, delivery_id) for delivery_id in delivery_ids])
+                    for delivery_id in delivery_ids:
+                        c.execute("UPDATE outbox_attempts SET result='accepted' WHERE delivery_id=? AND attempt_number=(SELECT MAX(attempt_number) FROM outbox_attempts WHERE delivery_id=?)",
+                                  (delivery_id, delivery_id))
+                    c.executemany("UPDATE health_incidents SET notified_at=? WHERE incident_id=?",
+                                  [(now, incident_id) for incident_id in notice_ids])
+                    c.commit()
+                    return {"delivered": len(delivery_ids), "emails": 0, "notices": len(notice_ids),
+                            "status": "previously_accepted"}
+                c.execute("UPDATE delivery_batches SET status='cancelled',updated_at=? WHERE batch_id=?",
+                          (now, batch["batch_id"]))
+                c.executemany("UPDATE outbox SET status='cancelled' WHERE delivery_id=? AND status='sending'",
+                              [(delivery_id,) for delivery_id in delivery_ids])
+                c.executemany("UPDATE outbox_attempts SET result='cancelled' WHERE delivery_id=? AND result='started'",
+                              [(delivery_id,) for delivery_id in delivery_ids])
+                c.commit()
+                return {"delivered": 0, "emails": 0, "notices": 0, "status": "cancelled_stale"}
+            c.execute("UPDATE delivery_batches SET status='sending',attempts=attempts+1,retry_after=NULL WHERE batch_id=?", (batch["batch_id"],))
+            batch_attempt = c.execute("SELECT attempts FROM delivery_batches WHERE batch_id=?", (batch["batch_id"],)).fetchone()[0]
+            c.commit()
+            digest_id = batch["digest_id"]
+            batch_id = batch["batch_id"]
+            if retrying_batch:
+                for delivery_id in delivery_ids:
+                    next_attempt = c.execute("SELECT COALESCE(MAX(attempt_number),0)+1 FROM outbox_attempts WHERE delivery_id=?",
+                                             (delivery_id,)).fetchone()[0]
+                    c.execute("INSERT INTO outbox_attempts VALUES(?,?,?,?,?)",
+                              (uuid.uuid4().hex, delivery_id, next_attempt, "started", now))
+        try:
+            self.email_sink.deliver_digest(digest_id, projects, notices)
+        except Exception as exc:
+            retryable = bool(getattr(self.email_sink, "idempotent_acceptance", False)) or isinstance(exc, DeliveryNotAccepted)
+            next_status = "retryable" if retryable else "ambiguous"
+            retry_after = (iso(self.clock() + timedelta(seconds=min(3600, 60 * (2 ** min(max(batch_attempt - 1, 0), 5)))))
+                           if retryable else None)
             with self.db.connect() as c:
-                source = c.execute("SELECT * FROM projects WHERE project_id=?", (row["project_id"],)).fetchone()
-                now = iso(self.clock())
-                if (source is None or source["disposition"] != "open" or source["archived"] or not source["eligible"] or
-                        source["assessment_kind"] != "attention" or
-                        (source["snooze_until"] is not None and source["snooze_until"] > now)):
-                    c.execute("UPDATE outbox SET status='cancelled' WHERE delivery_id=? AND status='pending'", (row["delivery_id"],))
-                    continue
-            project = {"outcome": source["outcome"], "next_action": source["next_action"],
-                       "reasoning": source["reasoning"], "evidence": json.loads(source["evidence_json"])}
-            self.email_sink.deliver(row["delivery_id"], project)
-            with self.db.connect() as c:
-                c.execute("UPDATE outbox SET status='delivered', delivered_at=? WHERE delivery_id=? AND status='pending'",
-                          (iso(self.clock()), row["delivery_id"]))
-            delivered += 1
-        return {"delivered": delivered}
+                c.execute("UPDATE delivery_batches SET status=?,retry_after=?,updated_at=? WHERE batch_id=?",
+                          (next_status, retry_after, now, batch_id))
+                if not retryable:
+                    c.executemany("UPDATE outbox SET status='ambiguous' WHERE delivery_id=? AND status='sending'",
+                                  [(delivery_id,) for delivery_id in delivery_ids])
+                if delivery_ids:
+                    c.executemany("UPDATE outbox_attempts SET result=? WHERE delivery_id=? AND result='started'",
+                                  [("retryable" if retryable else "ambiguous", delivery_id) for delivery_id in delivery_ids])
+            return {"delivered": 0, "emails": 0, "notices": 0,
+                    "status": "retryable" if retryable else "ambiguous"}
+        with self.db.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            c.execute("UPDATE delivery_batches SET status='accepted',updated_at=? WHERE batch_id=?", (now, batch_id))
+            c.executemany("UPDATE outbox SET status='delivered',delivered_at=? WHERE delivery_id=? AND status='sending'",
+                          [(now, delivery_id) for delivery_id in delivery_ids])
+            if delivery_ids:
+                c.executemany("UPDATE outbox_attempts SET result='accepted' WHERE delivery_id=? AND result='started'",
+                              [(delivery_id,) for delivery_id in delivery_ids])
+            if notice_ids:
+                c.executemany("UPDATE health_incidents SET notified_at=? WHERE incident_id=?", [(now, incident_id) for incident_id in notice_ids])
+            c.commit()
+        return {"delivered": len(delivery_ids), "emails": 1, "notices": len(notice_ids)}
 
     def _project(self, c, project_id):
         row = c.execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone()
@@ -395,6 +835,7 @@ class WatchkeeperService:
             raise KeyError("project not found")
         return row
 
+    @_serialized
     def decide(self, project_id: str, action: str, *, until=None) -> dict:
         now = iso(self.clock())
         with self.db.connect() as c:
@@ -439,18 +880,21 @@ class WatchkeeperService:
         result = self.decide(project_id, "snooze", until=until)
         return {"project_id": project_id, "snooze_until": result["snooze_until"]}
 
+    @_serialized
     def exclude_source(self, source_id: str, excluded: bool) -> dict:
         if not source_id or len(source_id) > 200:
             raise ValueError("invalid source_id")
         self.privacy.set_source_excluded(source_id, excluded)
         return {"source_id": source_id, "excluded": excluded}
 
+    @_serialized
     def exclude_thread(self, source_id: str, thread_id: str, excluded: bool) -> dict:
         if not source_id or not thread_id or len(source_id) > 200 or len(thread_id) > 500:
             raise ValueError("invalid source or thread identity")
         self.privacy.set_thread_excluded(source_id, thread_id, excluded)
         return {"source_id": source_id, "thread_id": thread_id, "excluded": excluded}
 
+    @_serialized
     def assign_thread(self, source_id: str, thread_id: str, project_id: str, from_project_id=None) -> dict:
         if not source_id or not thread_id or len(source_id) > 200 or len(thread_id) > 500:
             raise ValueError("invalid source or thread identity")
@@ -462,7 +906,7 @@ class WatchkeeperService:
         now = iso(self.clock())
         with self.db.connect() as c:
             c.execute("BEGIN IMMEDIATE")
-            obs = [dict(r) for r in c.execute("SELECT * FROM observations WHERE source_id=? AND thread_id=?",
+            obs = [dict(r) for r in c.execute("SELECT * FROM reviewable_observations WHERE source_id=? AND thread_id=?",
                                                (source_id, thread_id)).fetchall()]
             if not obs:
                 raise KeyError("conversation not found")
@@ -546,6 +990,8 @@ class WatchkeeperService:
             excluded_threads = {(r[0], r[1]) for r in c.execute("SELECT source_id,thread_id FROM excluded_threads")}
             ownership = {(r[0], r[1]): r[2] for r in c.execute("SELECT source_id,thread_id,project_id FROM thread_ownership")}
             associations = {(r[0], r[1], r[2]) for r in c.execute("SELECT source_id,thread_id,project_id FROM project_threads")}
+            incidents = [dict(r) for r in c.execute("SELECT incident_id,category,subject,failure_kind,status,first_seen,last_seen,occurrences,notified_at FROM health_incidents ORDER BY first_seen DESC")]
+            runs = [dict(r) for r in c.execute("SELECT run_id,schedule_key,status,cursor_json,attempts,failure_kind,created_at,updated_at FROM monitoring_runs ORDER BY created_at DESC LIMIT 20")]
         result = []
         for row in projects:
             item = dict(row)
@@ -571,4 +1017,70 @@ class WatchkeeperService:
                 "thread_ownership": [{"source_id": s, "thread_id": t, "project_id": p}
                                      for (s, t), p in sorted(ownership.items())],
                 "project_threads": [{"source_id": s, "thread_id": t, "project_id": p}
-                                    for s, t, p in sorted(associations)]}
+                                    for s, t, p in sorted(associations)],
+                "monitoring": {"health_incidents": incidents, "review_runs": runs,
+                               "open_notices": [i for i in incidents if i["status"] == "open" and i["occurrences"] >= 2]}}
+
+    @_serialized
+    def scheduled_tick(self):
+        """Create today's durable jobs and send the due daily digest."""
+        self.privacy.expire()
+        self.scheduler.ensure_daily()
+        if self.scheduler.due("digest"):
+            key = self.scheduler.local_key("digest")
+            with self.db.connect() as c:
+                batch = c.execute("SELECT * FROM digest_batches WHERE schedule_key=? AND status='pending'",
+                                   (key,)).fetchone()
+            if batch is not None:
+                result = self.deliver_pending()
+                result_status = result.get("status")
+                status = ("pending" if result_status in {"retryable", "retry_deferred"} else
+                          "ambiguous" if result_status == "ambiguous" else
+                          "delivered" if result.get("emails") or result_status == "previously_accepted" else
+                          "empty")
+                with self.db.connect() as c:
+                    c.execute("UPDATE digest_batches SET status=?,delivered_at=? WHERE batch_id=? AND status='pending'",
+                              (status, None if status == "pending" else iso(self.clock()), batch["batch_id"]))
+                return result
+        return {"delivered": 0, "emails": 0, "notices": 0}
+
+    def privacy_purge_hook(self, c, *, project_ids, threads, observation_ids, delivery_ids):
+        """Erase content-free recovery references affected by a privacy purge."""
+        pairs = set(threads)
+        obs = set(observation_ids)
+        project_ids = set(project_ids)
+        captures = set()
+        if delivery_ids:
+            delivery_placeholders = ",".join("?" for _ in delivery_ids)
+            for batch in c.execute("SELECT batch_id,digest_id,delivery_ids_json FROM delivery_batches").fetchall():
+                members = set(json.loads(batch["delivery_ids_json"]))
+                affected = members.intersection(delivery_ids)
+                if affected:
+                    captures.add(batch["digest_id"])
+                    remaining = members - set(delivery_ids)
+                    if remaining:
+                        member_placeholders = ",".join("?" for _ in remaining)
+                        c.execute(f"UPDATE outbox SET status='cancelled' WHERE status='sending' AND delivery_id IN ({member_placeholders})",
+                                  tuple(remaining))
+                        c.execute(f"UPDATE outbox_attempts SET result='cancelled' WHERE result IN ('started','retryable') AND delivery_id IN ({member_placeholders})",
+                                  tuple(remaining))
+                    c.execute("DELETE FROM delivery_batches WHERE batch_id=?", (batch["batch_id"],))
+        for row in c.execute("SELECT run_id,snapshot_json FROM monitoring_runs WHERE snapshot_json IS NOT NULL").fetchall():
+            try:
+                snapshot = json.loads(row["snapshot_json"])
+            except (TypeError, json.JSONDecodeError):
+                snapshot = {}
+            refs = snapshot.get("revisions", {}) if isinstance(snapshot, dict) else {}
+            if any(oid in obs or (value.get("source_id"), value.get("thread_id")) in pairs
+                   for oid, value in refs.items() if isinstance(value, dict)):
+                c.execute("UPDATE monitoring_runs SET status='invalidated',snapshot_json=NULL,lease_token=NULL,lease_until=NULL WHERE run_id=?",
+                          (row["run_id"],))
+        if pairs or obs or project_ids:
+            c.execute("UPDATE review_progress SET cursor_json=NULL WHERE stream='history'")
+        if project_ids:
+            project_placeholders = ",".join("?" for _ in project_ids)
+            c.execute(f"DELETE FROM project_assessment_guards WHERE project_id IN ({project_placeholders})",
+                      tuple(project_ids))
+        if delivery_ids:
+            c.execute(f"DELETE FROM outbox_attempts WHERE delivery_id IN ({delivery_placeholders})", tuple(delivery_ids))
+        return sorted(captures)
