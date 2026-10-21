@@ -1,5 +1,16 @@
 # Ticket 05 verification
 
+## Combined monitoring checkpoint
+
+After integrating ticket 06, the coordinator independently passed all 78
+existing checks, then 22 privacy/lifecycle checks with ResourceWarnings treated
+as errors. Six new combined scenarios verify leased retained evidence after raw
+expiry, persistent snooze, old citations with current versus expired newer
+context, aggregate capture deletion, scheduler cleanup during restore replay,
+scheduled retention maintenance, and existing shared projects alongside archive
+alias protection. Deletion previews count actual app-controlled aggregate
+captures once; external accepted mail cannot be recalled.
+
 The coordinator independently ran `python3 -m unittest discover -s tests -v`
 on 2026-10-21: all 30 tests passed against the integrated collection, decisions
 and privacy code. The privacy cases exercise real SQLite state and application

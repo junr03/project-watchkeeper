@@ -93,7 +93,23 @@ class WatchkeeperService:
 
     @_serialized
     def deletion_preview(self, project_id):
-        return self.privacy.preview(project_id)
+        preview = self.privacy.preview(project_id)
+        projects = [project_id, *preview["affected_projects"]]
+        with self.db.connect() as c:
+            marks = ",".join("?" for _ in projects)
+            rows = c.execute(f"SELECT delivery_id,status FROM outbox WHERE project_id IN ({marks})",
+                             projects).fetchall()
+            delivery_ids = {row["delivery_id"] for row in rows}
+            capture_ids = set(delivery_ids)
+            for batch in c.execute("SELECT digest_id,delivery_ids_json FROM delivery_batches"):
+                if delivery_ids.intersection(json.loads(batch["delivery_ids_json"])):
+                    capture_ids.add(batch["digest_id"])
+        preview["pending_notifications"] = sum(row["status"] in {"pending", "sending"} for row in rows)
+        preview["captured_emails"] = (sum(
+            (self.privacy.email_dir / (re.sub(r"[^A-Za-z0-9._-]", "_", capture_id) + ".eml")).is_file()
+            for capture_id in capture_ids) if self.privacy.email_dir is not None else 0)
+        preview["external_mail_cannot_be_recalled"] = True
+        return preview
 
     @_serialized
     def delete_project(self, project_id, impact_token, *, confirmed):
@@ -196,7 +212,10 @@ class WatchkeeperService:
             requested_id = assessment["project_id"]
             owner_mismatch = any(owner != requested_id for owner in owners)
             grouping_conflict = len(owners) > 1
+            established_pairs = {(row["source_id"], row["thread_id"]) for row in related
+                                 if row["project_id"] == requested_id}
             hidden_alias = any(row["project_id"] != requested_id and
+                               (row["source_id"], row["thread_id"]) not in established_pairs and
                                (row["disposition"] != "open" or row["archived"] or
                                 (row["snooze_until"] is not None and row["snooze_until"] > iso(self.clock())))
                                for row in related)
@@ -1077,6 +1096,7 @@ class WatchkeeperService:
                           (row["run_id"],))
         if pairs or obs or project_ids:
             c.execute("UPDATE review_progress SET cursor_json=NULL WHERE stream='history'")
+            c.execute("UPDATE monitoring_runs SET cursor_json=NULL WHERE cursor_json IS NOT NULL")
         if project_ids:
             project_placeholders = ",".join("?" for _ in project_ids)
             c.execute(f"DELETE FROM project_assessment_guards WHERE project_id IN ({project_placeholders})",
