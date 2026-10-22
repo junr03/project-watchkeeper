@@ -79,7 +79,8 @@ Current draft PRs: [01 / #2](https://github.com/junr03/project-watchkeeper/pull/
 [03 / #5](https://github.com/junr03/project-watchkeeper/pull/5),
 [05 / #6](https://github.com/junr03/project-watchkeeper/pull/6),
 [06 / #7](https://github.com/junr03/project-watchkeeper/pull/7),
-[07 / #8](https://github.com/junr03/project-watchkeeper/pull/8).
+[07 / #8](https://github.com/junr03/project-watchkeeper/pull/8),
+[CI follow-up / #10](https://github.com/junr03/project-watchkeeper/pull/10).
 
 ## CI delivery follow-up
 
@@ -89,7 +90,7 @@ ticket 07, not an eighth feature ticket or a change to the approved graph.
 
 | Work | Owner | Execution | Evidence |
 | --- | --- | --- | --- |
-| CI workflows and reproducible compatibility helpers | Luna `ci_luna` / coordinator review and verification | Implemented on `jnr/08-ci`, based on `jnr/07-portable-milestone` | Coordinator independently passed Python 3.12/3.14 (93 tests each), actionlint, both image builds, production Compose checks, both browser phases, actual Codex compatibility and OpenClaw runtime checks; hosted PR checks pending |
+| CI workflows and reproducible compatibility helpers | Luna `ci_luna` / coordinator review and verification | Implemented on `jnr/08-ci`, based on `jnr/07-portable-milestone` | Coordinator independently passed Python 3.12/3.14 (93 tests each), actionlint, both image builds, production Compose checks, both browser phases, actual Codex compatibility and OpenClaw runtime checks; [hosted check results](https://github.com/junr03/project-watchkeeper/pull/10/checks) |
 
 CI uses synthetic evidence and local mail capture. Private Mac history,
 subscription inference/renewal, real reviewer judgment and production
