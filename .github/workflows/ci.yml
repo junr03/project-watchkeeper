@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflow-lint:
+    name: Workflow lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned actionlint
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output /tmp/actionlint.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz' | sha256sum --check
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+      - run: /tmp/actionlint -color
+
+  python:
+    name: Python ${{ matrix.python }} tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.14']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run application and policy tests
+        run: python -W error::ResourceWarning -m unittest discover -s tests -v
+
+  containers:
+    name: Container builds and reviewer checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build application and reviewer images
+        run: |
+          docker build --network=none -t project-watchkeeper:ci -f Dockerfile .
+          docker build --network=none -t project-watchkeeper-reviewer:ci -f Dockerfile.reviewer .
+      - name: Validate production Compose configuration
+        run: tests/ci/check-production-compose.sh
+      - name: Validate pinned reviewer runtime and refusal behavior
+        run: tests/ci/check-reviewer-runtime.sh
+
+  compose-browser:
+    name: Synthetic Compose and browser acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/ci/package-lock.json
+      - name: Install locked browser dependency
+        run: npm ci --prefix tests/ci --ignore-scripts
+      - name: Run synthetic boundary and browser acceptance
+        env:
+          PLAYWRIGHT_NODE_MODULES: ${{ github.workspace }}/tests/ci/node_modules
+          WATCHKEEPER_COMPOSE_PROJECT: watchkeeper-ci-${{ github.run_id }}-${{ github.run_attempt }}
+        run: tests/compose-acceptance.sh
+
+  codex-modern:
+    name: Synthetic Codex 0.162.1 compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: Install exact Codex CLI version
+        run: npm install --global @openai/codex@0.162.1
+      - name: Run credential-free local Responses API compatibility check
+        run: python tests/codex-modern-compat.py --codex-binary "$(command -v codex)"

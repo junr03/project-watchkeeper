@@ -37,6 +37,7 @@ external services here.
 See the [application contract](docs/application-contract.md), [Codex source
 reader](docs/codex-reader.md), [restricted reviewer](docs/reviewer.md),
 [recovery guidance](docs/recovery.md), and [Electricpeak handoff](docs/deployment-electricpeak.md).
+See [continuous integration](docs/ci.md) for GitHub Actions checks and local reproduction.
 
 - [Feature specification](.scratch/project-watchkeeper/spec.md)
 - [Implementation guide and acceptance checks](docs/implementation.md)
