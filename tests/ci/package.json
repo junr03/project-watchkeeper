@@ -1,0 +1,10 @@
+{
+  "name": "watchkeeper-ci-tools",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Pinned external Playwright dependency for synthetic Compose acceptance",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "playwright": "1.64.1"
+  }
+}
