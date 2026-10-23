@@ -79,9 +79,11 @@ def run(data_dir: Path):
         selected = [o for o in reviewer_view["observations"] if o["source_id"] == batch["source_id"]]
         refs = [o["observation_id"] for o in selected]
         proposal = {"project_id": "garden-guide", "outcome": "Publish a garden guide with three tested planting plans",
-                    "next_action": "Ask a local nursery to confirm the planting dates",
-                    "reasoning": "The outline is drafted, but source evidence says the planting plans have not been tested.",
-                    "evidence_refs": refs}
+                    "next_action": "Choose three planting zones for the garden guide",
+                    "reasoning": "The source asks the user to choose the planting zones before testing can finish.",
+                    "evidence_refs": refs,
+                    "evidence_revisions": {o["observation_id"]: o["revision"] for o in selected},
+                    "status": "explicit_request", "grouping_confidence": "strong"}
         call(base, "/api/reviews", token=config.reviewer_token, body=proposal)
         _, page, _ = call(base, "/", basic=(config.ui_username, config.ui_password))
         csrf = re.search(r"const csrf=\"([^\"]+)\"", page).group(1)
@@ -93,6 +95,8 @@ def run(data_dir: Path):
         until = (clock() + timedelta(days=1)).isoformat()
         call(base, f"/api/projects/{project['project_id']}/snooze", basic=(config.ui_username, config.ui_password),
              cookie=f"pw_csrf={csrf}", csrf=csrf, body={"until": until})
+        snoozed_view = call(base, "/api/review-input", token=config.reviewer_token)[1]
+        assert not any(o["observation_id"] in refs for o in snoozed_view["observations"])
         before_preview = call(base, "/api/state", basic=(config.ui_username, config.ui_password))[1]
         call(base, "/", basic=(config.ui_username, config.ui_password))
         after_preview = call(base, "/api/state", basic=(config.ui_username, config.ui_password))[1]
@@ -113,8 +117,8 @@ def run(data_dir: Path):
         clock.advance(hours=1)
         waking = dict(batch, cursor="demo-cursor-wake", available=True)
         _, wake_result, _ = call(base, "/api/observations", token=config.intake_token, body=waking)
-        view = call(base, "/api/review-input", token=config.reviewer_token)[1]
-        proposal["evidence_refs"] = [o["observation_id"] for o in view["observations"]]
+        # This is a stale direct replay. The service must suppress it while the
+        # user snooze is active; the filtered reviewer snapshot is empty.
         call(base, "/api/reviews", token=config.reviewer_token, body=proposal)
         _, after_wake_delivery, _ = call(base, "/api/deliver", basic=(config.ui_username, config.ui_password),
                                           cookie=f"pw_csrf={csrf}", csrf=csrf)

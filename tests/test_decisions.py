@@ -175,7 +175,9 @@ class DecisionsHTTPTest(unittest.TestCase):
         value = {"project_id": project_id, "outcome": "Publish a tested garden guide",
                  "next_action": "Ask a local nursery to confirm planting dates",
                  "reasoning": "The draft is ready, but evidence says the plans are untested.",
-                 "evidence_refs": [item["observation_id"] for item in refs]}
+                 "evidence_refs": [item["observation_id"] for item in refs],
+                 "evidence_revisions": {item["observation_id"]: item["revision"] for item in refs},
+                 "status": "explicit_request", "grouping_confidence": "strong"}
         return value
 
     def _ingest_and_review(self):
@@ -208,6 +210,10 @@ class DecisionsHTTPTest(unittest.TestCase):
         revised = self._request("/api/observations", token="intake-secret", payload=revised_batch)[1]
         self.assertEqual(2, revised["stored"])
         proposal["outcome"] = "Hostile rewrite of a completed project"
+        # Reuse the same evidence identities with their current revisions. The
+        # service can now exercise lifecycle suppression instead of rejecting
+        # this replay solely because the review snapshot is stale.
+        proposal["evidence_revisions"] = {ref: "2" for ref in proposal["evidence_refs"]}
         rejected = self._request("/api/reviews", token="reviewer-secret", payload=proposal)[1]
         self.assertEqual("suppressed", rejected["status"])
         state = self._request("/api/state", basic=("alice", "private-pass"))[1]

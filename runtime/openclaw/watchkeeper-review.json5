@@ -1,0 +1,27 @@
+{
+  "agents": {
+    "defaults": {
+      "model": "openai/gpt-6-astra",
+      "models": {
+        "openai/gpt-6-astra": {
+          "agentRuntime": { "id": "openclaw" }
+        }
+      }
+    }
+  },
+  "auth": {
+    "order": {
+      "openai": ["openai:watchkeeper-subscription"]
+    }
+  },
+  "plugins": {
+    "allow": ["openai"],
+    "deny": ["codex"]
+  },
+  "mcp": {
+    "servers": {}
+  },
+  "tools": {
+    "deny": ["*"]
+  }
+}

@@ -19,11 +19,12 @@ def iso(value: datetime) -> str:
 
 
 class WatchkeeperService:
-    def __init__(self, database: Database, email_sink, clock=None, stale_after_seconds=3600):
+    def __init__(self, database: Database, email_sink, clock=None, stale_after_seconds=3600, inferred_after_days=3):
         self.db = database
         self.email_sink = email_sink
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.stale_after_seconds = stale_after_seconds
+        self.inferred_after_days = inferred_after_days
         self.intake = Intake(database, self.clock, stale_after_seconds)
 
     def ingest(self, batch: dict) -> dict:
@@ -94,7 +95,9 @@ class WatchkeeperService:
             # observations cannot be smuggled back into a review proposal.
             obs = {oid: row for oid, row in all_obs.items()
                    if not self._excluded(c, row["source_id"], row["thread_id"])}
-            assessment = validate_proposal(proposal, obs, now=self.clock(), sources=sources)
+            assessment = validate_proposal(proposal, obs, now=self.clock(), sources=sources,
+                                           inferred_after_days=self.inferred_after_days,
+                                           source_stale_after_seconds=self.stale_after_seconds)
             evidence_rows = [obs[ref] for ref in assessment["evidence_refs"]]
             owners = {r["project_id"] for r in c.execute("SELECT source_id,thread_id,project_id FROM thread_ownership").fetchall()
                       if any(e["source_id"] == r["source_id"] and e["thread_id"] == r["thread_id"] for e in evidence_rows)}
