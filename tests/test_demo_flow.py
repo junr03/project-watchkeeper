@@ -152,7 +152,7 @@ class HTTPFlowTest(unittest.TestCase):
         self.clock.advance(hours=1)
         waking = dict(self.batch, cursor="cursor-wake", available=True)
         self.assertEqual(0, self._request("/api/observations", token=self.config.intake_token, payload=waking)[1]["stored"])
-        proposal["evidence_refs"] = self._proposal()["evidence_refs"]
+        self.assertEqual([], self._request("/api/review-input", token=self.config.reviewer_token)[1]["observations"])
         self._request("/api/reviews", token=self.config.reviewer_token, payload=proposal)
         _, csrf_page, _ = self._request("/", basic=(self.config.ui_username, self.config.ui_password))
         csrf2 = __import__("re").search(r"const csrf=\"([^\"]+)\"", csrf_page).group(1)
