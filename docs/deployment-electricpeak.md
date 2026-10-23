@@ -17,8 +17,35 @@ The current portable artifacts are [`Dockerfile`](../Dockerfile),
 [container runtime guide](container-runtime.md) for startup, configuration,
 network, secret, backup, shutdown, and rollback procedures.
 
+The deployment owner retrieves both Compose files from the Watchkeeper
+revision being deployed, then supplies matching published app and reviewer
+references. This uses the image-only platform surface without cloning the
+Watchkeeper source repository. For example:
+
+```sh
+WATCHKEEPER_REVISION=REPLACE_WITH_PUBLISHED_COMMIT_SHA
+curl -fsS "https://raw.githubusercontent.com/junr03/project-watchkeeper/${WATCHKEEPER_REVISION}/compose.yaml" -o compose.yaml
+curl -fsS "https://raw.githubusercontent.com/junr03/project-watchkeeper/${WATCHKEEPER_REVISION}/compose.production.yaml" -o compose.production.yaml
+export WATCHKEEPER_IMAGE="ghcr.io/junr03/project-watchkeeper:sha-${WATCHKEEPER_REVISION}"
+export WATCHKEEPER_REVIEWER_IMAGE="ghcr.io/junr03/project-watchkeeper-reviewer:sha-${WATCHKEEPER_REVISION}"
+docker compose -f compose.yaml -f compose.production.yaml pull
+docker compose -f compose.yaml -f compose.production.yaml up --no-build -d
+```
+
+The required secret files and external networks are operator-created as
+described in the runtime guide. This flow is available after the publication
+change has merged to `main` and its first publication workflow succeeds. GHCR
+packages may initially be private; the owner must set the intended package
+visibility and verify anonymous pulling before relying on unauthenticated
+host pulls. See [GitHub's container registry guidance](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+
 - Versioned container artifacts and public-safe Compose examples with
   independently constrained components where privileges differ.
+- GHCR app and reviewer images published by Watchkeeper CI after all checks
+  pass on `main`; deployment consumes published images and Compose and does
+  not build Watchkeeper from source. Pin both images to the same commit or to
+  the digest references reported by CI. The `main` tags move and update
+  sequentially.
 - Documented configuration, credential-file, and persistent-state interfaces.
 - Configurable internal service port, private base URL and CSRF origin allowlist,
   mandatory application authentication, and network dependencies.

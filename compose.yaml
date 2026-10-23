@@ -2,10 +2,7 @@
 # secret files and an operator-selected private ingress for deployment.
 services:
   app:
-    image: project-watchkeeper:0.1.0
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${WATCHKEEPER_IMAGE:-ghcr.io/junr03/project-watchkeeper:main}
     restart: unless-stopped
     stop_grace_period: ${WATCHKEEPER_STOP_GRACE_PERIOD:-3m}
     read_only: true
@@ -45,10 +42,7 @@ services:
       start_period: 10s
 
   smtp-sink:
-    image: project-watchkeeper:0.1.0
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${WATCHKEEPER_IMAGE:-ghcr.io/junr03/project-watchkeeper:main}
     entrypoint: [python, -m, watchkeeper.smtp_sink]
     restart: unless-stopped
     read_only: true
@@ -65,10 +59,7 @@ services:
       retries: 5
 
   private-ingress:
-    image: project-watchkeeper:0.1.0
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${WATCHKEEPER_IMAGE:-ghcr.io/junr03/project-watchkeeper:main}
     entrypoint: [python, -m, watchkeeper.private_ingress]
     restart: unless-stopped
     read_only: true
@@ -87,10 +78,7 @@ services:
     profiles: [acceptance]
 
   reviewer:
-    image: project-watchkeeper-reviewer:0.1.0
-    build:
-      context: .
-      dockerfile: Dockerfile.reviewer
+    image: ${WATCHKEEPER_REVIEWER_IMAGE:-ghcr.io/junr03/project-watchkeeper-reviewer:main}
     restart: unless-stopped
     profiles: [live-reviewer]
     network_mode: none
@@ -105,17 +93,13 @@ services:
       - reviewer-auth:/run/watchkeeper/openclaw-auth
       - reviewer-broker:/run/watchkeeper/broker:ro
       - inference-proxy:/run/watchkeeper/proxy:ro
-      - ./runtime/openclaw/watchkeeper-review.json5:/etc/watchkeeper/openclaw.json5:ro
     environment:
       WATCHKEEPER_REVIEWER_BROKER_TOKEN: demo-reviewer-token-not-for-deployment
       WATCHKEEPER_REVIEW_ONCE: "0"
     depends_on: [inference-proxy]
 
   inference-proxy:
-    image: project-watchkeeper:0.1.0
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${WATCHKEEPER_IMAGE:-ghcr.io/junr03/project-watchkeeper:main}
     entrypoint: [python, -m, watchkeeper.reviewer_proxy]
     restart: unless-stopped
     profiles: [live-reviewer]

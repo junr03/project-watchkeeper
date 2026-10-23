@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   workflow-lint:
@@ -63,6 +63,8 @@ jobs:
           docker build --network=none -t project-watchkeeper-reviewer:ci -f Dockerfile.reviewer .
       - name: Validate production Compose configuration
         run: tests/ci/check-production-compose.sh
+      - name: Validate image-only Compose contract
+        run: tests/ci/check-compose-contract.sh
       - name: Validate pinned reviewer runtime and refusal behavior
         run: tests/ci/check-reviewer-runtime.sh
 
@@ -108,3 +110,66 @@ jobs:
         run: npm install --global @openai/codex@0.162.1
       - name: Run credential-free local Responses API compatibility check
         run: python tests/codex-modern-compat.py --codex-binary "$(command -v codex)"
+
+  publish-ghcr:
+    name: Publish Watchkeeper images to GHCR
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'junr03/project-watchkeeper'
+    needs: [workflow-lint, python, containers, compose-browser, codex-modern]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+      - name: Build and publish commit-specific tags
+        env:
+          REVISION: ${{ github.sha }}
+          VERSION: 0.1.0
+        run: |
+          docker buildx build --platform linux/amd64 --network=none --push --metadata-file /tmp/watchkeeper-app-metadata.json \
+            --label "org.opencontainers.image.source=https://github.com/junr03/project-watchkeeper" \
+            --label "org.opencontainers.image.revision=$REVISION" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            -t "ghcr.io/junr03/project-watchkeeper:sha-$REVISION" \
+            -f Dockerfile .
+          docker buildx build --platform linux/amd64 --network=none --push --metadata-file /tmp/watchkeeper-reviewer-metadata.json \
+            --label "org.opencontainers.image.source=https://github.com/junr03/project-watchkeeper" \
+            --label "org.opencontainers.image.revision=$REVISION" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            -t "ghcr.io/junr03/project-watchkeeper-reviewer:sha-$REVISION" \
+            -f Dockerfile.reviewer .
+      - name: Report published registry digests
+        env:
+          REVISION: ${{ github.sha }}
+        run: |
+          app_digest=$(jq -er '.["containerimage.digest"] | select(test("^sha256:[0-9a-f]{64}$"))' /tmp/watchkeeper-app-metadata.json)
+          reviewer_digest=$(jq -er '.["containerimage.digest"] | select(test("^sha256:[0-9a-f]{64}$"))' /tmp/watchkeeper-reviewer-metadata.json)
+          {
+            echo '### Published Watchkeeper images'
+            printf 'Revision: %s\n' "$REVISION"
+            printf 'Platform: linux/amd64\n'
+            printf -- '- ghcr.io/junr03/project-watchkeeper@%s (tag sha-%s)\n' "$app_digest" "$REVISION"
+            printf -- '- ghcr.io/junr03/project-watchkeeper-reviewer@%s (tag sha-%s)\n' "$reviewer_digest" "$REVISION"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Advance main tags after both commit images exist
+        env:
+          REVISION: ${{ github.sha }}
+        run: |
+          remote_main=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$remote_main" != "$REVISION" ]; then
+            echo "Skipping moving main tags because $REVISION is no longer the current main commit."
+            exit 0
+          fi
+          docker buildx imagetools create \
+            -t ghcr.io/junr03/project-watchkeeper:main \
+            "ghcr.io/junr03/project-watchkeeper:sha-$REVISION"
+          docker buildx imagetools create \
+            -t ghcr.io/junr03/project-watchkeeper-reviewer:main \
+            "ghcr.io/junr03/project-watchkeeper-reviewer:sha-$REVISION"

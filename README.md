@@ -9,11 +9,18 @@ application, and configurable container artifacts. The default Compose stack
 uses only generated content, demo credentials, and a local SMTP capture sink;
 it does not connect to a source account, hosted model, or external mail server.
 
-For a local container startup with Docker Compose 2.24.4 or newer:
+For a synthetic container startup with Docker Compose 2.24.4 or newer:
+
+This pull flow becomes available after the GHCR publication change has merged
+to `main` and its first publication workflow succeeds. GHCR packages may begin
+private; the package owner must set visibility and verify anonymous pulls
+before operators rely on unauthenticated access. See [GitHub's container
+registry guidance](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
 
 ```sh
 docker compose config --quiet
-docker compose up --build -d --wait
+docker compose pull
+docker compose up --no-build -d --wait
 curl -fsS http://127.0.0.1:8765/readyz
 ```
 
@@ -25,8 +32,12 @@ acceptance with external Playwright tooling using
 Python flow, run `python3 -m watchkeeper.demo`; the test suite runs with
 `python3 -m unittest discover -s tests -v`.
 
-The app and reviewer images are versioned `0.1.0` and use pinned base image
-digests. `compose.production.yaml` is an operator template that requires
+Watchkeeper CI publishes the app and reviewer images to GHCR after all CI jobs
+pass on `main`. Use matching full-commit `sha-<40-character-sha>` tags or
+digest references for deployment; `main` is a moving convenience tag. The
+images target `linux/amd64` and use pinned base image digests.
+`compose.build.yaml` is only for local development and CI.
+`compose.production.yaml` is an operator template that requires
 private secret files, explicit HTTPS origins, an SMTP server, and externally
 managed private networks. Read [container operations](docs/container-runtime.md)
 before adapting it. Live Codex, OAuth, model judgment, outbound SMTP, ingress
