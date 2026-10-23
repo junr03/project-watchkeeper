@@ -9,7 +9,7 @@ Replan with the user before materially exceeding the accepted scope or range.
 
 | Ticket | Blocked by | Execution |
 | --- | --- | --- |
-| [01: Demonstrate a Codex project becoming an attention item](issues/01-codex-attention-demo.md) | None | Planned |
+| [01: Demonstrate a Codex project becoming an attention item](issues/01-codex-attention-demo.md) | None | Complete — [verified synthetic evidence](../../docs/evidence-01.md) |
 | [02: Collect actual Codex threads with visible coverage](issues/02-codex-collection-coverage.md) | 01 | Planned |
 | [03: Assess unfinished outcomes through restricted OpenClaw review](issues/03-restricted-openclaw-review.md) | 01 | Planned |
 | [04: Make project decisions persist across reviews](issues/04-persistent-project-decisions.md) | 01 | Planned |
