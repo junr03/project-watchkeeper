@@ -95,3 +95,16 @@ ticket 07, not an eighth feature ticket or a change to the approved graph.
 CI uses synthetic evidence and local mail capture. Private Mac history,
 subscription inference/renewal, real reviewer judgment and production
 activation remain separate live-validation gates.
+
+## Registry publication follow-up
+
+The owner requested application-owned GHCR publication and a Compose-only
+platform boundary after reviewing the Electricpeak smoke handoff. This extends
+ticket 07 W1/W3; triage and the original dependency graph remain unchanged.
+
+| Work | Owner | Execution | Evidence |
+| --- | --- | --- | --- |
+| Publish tested main images and provide an image-only Compose contract | Luna `ghcr_luna` / coordinator architecture, review and verification | Implemented and locally verified on `jnr/publish-ghcr` from merged main `7e31ce4`; publication awaits merge | Coordinator passed both linux/amd64 builds, base/production/build Compose contracts, copied-Compose browser journey before/after restart, embedded OpenClaw config/empty-tools/missing-OAuth checks, actionlint and ShellCheck; hosted checks are reported on the PR |
+
+Actual GHCR publication and anonymous pulls require the publishing change to
+reach main. Private account connections and platform activation remain separate.

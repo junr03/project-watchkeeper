@@ -3,22 +3,19 @@ set -eu
 
 image=ghcr.io/openclaw/openclaw@sha256:f40d1e66fd14d8c5b49c832f4100f83b53fdc01f5108f7db11de38fd0ee6dbe5
 reviewer_image=project-watchkeeper-reviewer:ci
-runtime_config="$PWD/runtime/openclaw/watchkeeper-review.json5"
 docker pull "$image"
 docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges --user 1000:1000 \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=0700,uid=1000,gid=1000 \
   --tmpfs /run/watchkeeper/openclaw-auth:rw,noexec,nosuid,size=8m,mode=0700,uid=1000,gid=1000 \
   -e OPENCLAW_CONFIG_PATH=/etc/watchkeeper/openclaw.json5 \
-  -v "$runtime_config:/etc/watchkeeper/openclaw.json5:ro" \
-  --entrypoint node "$image" /app/openclaw.mjs config validate
+  --entrypoint node "$reviewer_image" /app/openclaw.mjs config validate
 
 # Fail on compiled factory changes so a runtime upgrade gets an explicit review.
 docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges --user 1000:1000 \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=0700,uid=1000,gid=1000 \
-  -v "$runtime_config:/etc/watchkeeper/openclaw.json5:ro" \
-  --entrypoint node "$image" --input-type=module -e '
+  --entrypoint node "$reviewer_image" --input-type=module -e '
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 const config = JSON.parse(fs.readFileSync("/etc/watchkeeper/openclaw.json5", "utf8"));
@@ -38,7 +35,6 @@ output=$(docker run --rm --network none --read-only --cap-drop ALL \
   --tmpfs /run/watchkeeper/openclaw-auth:rw,noexec,nosuid,size=8m,mode=0700,uid=1000,gid=1000 \
   -e WATCHKEEPER_REVIEWER_BROKER_TOKEN=synthetic-ci-token \
   -e WATCHKEEPER_REVIEW_ONCE=1 \
-  -v "$runtime_config:/etc/watchkeeper/openclaw.json5:ro" \
   --entrypoint python3 "$reviewer_image" -m watchkeeper.reviewer 2>&1)
 status=$?
 set -e

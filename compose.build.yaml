@@ -1,0 +1,28 @@
+# Explicit local build and tags for development and CI. Production operators
+# use compose.yaml with published images and never need the source checkout.
+services:
+  app:
+    image: project-watchkeeper:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+  smtp-sink:
+    image: project-watchkeeper:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+  private-ingress:
+    image: project-watchkeeper:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+  reviewer:
+    image: project-watchkeeper-reviewer:local
+    build:
+      context: .
+      dockerfile: Dockerfile.reviewer
+  inference-proxy:
+    image: project-watchkeeper:local
+    build:
+      context: .
+      dockerfile: Dockerfile

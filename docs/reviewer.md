@@ -74,9 +74,12 @@ connectivity, or live model inference was attempted.
 Provision one OpenAI subscription OAuth profile with the exact id
 `openai:watchkeeper-subscription` in the dedicated reviewer-auth state
 directory. In a separately authorized setup environment, mount only that
-directory read-write and the fixed OpenClaw config read-only. Set both state
-and config paths explicitly so the command cannot discover a default account
-home:
+directory read-write. When running the raw OpenClaw setup command below,
+mount the fixed config read-only and set both state and config paths so the
+command cannot discover a default account home. The published Watchkeeper
+reviewer image already embeds this file at
+`/etc/watchkeeper/openclaw.json5`, so its Compose service needs no host config
+file or config bind mount:
 
 ```sh
 HOME=/tmp OPENCLAW_STATE_DIR=/run/watchkeeper/openclaw-auth \
@@ -87,7 +90,8 @@ HOME=/tmp OPENCLAW_STATE_DIR=/run/watchkeeper/openclaw-auth \
 
 Mount only that OpenClaw state directory at `/run/watchkeeper/openclaw-auth`
 with the narrow write access needed for OAuth refresh. Keep it separate from
-the read-only config mount. The worker preflights `models auth list` and refuses
+the read-only config mount in a raw setup; Compose uses the embedded read-only
+config. The worker preflights `models auth list` and refuses
 to run unless this exact profile is the only OpenAI profile and its credential
 type is `oauth`; no API-key fallback is selected. Do not mount a source
 account, general home directory, Codex history, or container-runtime socket.

@@ -3,3 +3,6 @@
 !Dockerfile.reviewer
 !watchkeeper/
 !watchkeeper/*.py
+!runtime/
+!runtime/openclaw/
+!runtime/openclaw/watchkeeper-review.json5

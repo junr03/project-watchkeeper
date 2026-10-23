@@ -9,7 +9,9 @@ configuration.
 
 ## Synthetic startup and acceptance
 
-Use Docker Compose v2 and Python is not required on the host. The app binds to
+Use Docker Compose v2 and Python is not required on the host. The standalone
+Compose file consumes published GHCR images and contains no build instructions.
+The app binds to
 loopback only. The synthetic browser run uses a Linux Docker Engine with host
 network mode for its temporary pinned Playwright browser runner. Install the
 Playwright 1.64.1 Node package outside the repository; the browser comes from
@@ -18,7 +20,8 @@ image.
 
 ```sh
 docker compose config --quiet
-docker compose up --build -d --wait
+docker compose pull
+docker compose up --no-build -d --wait
 curl -fsS http://127.0.0.1:8765/readyz
 ```
 
@@ -33,7 +36,11 @@ PLAYWRIGHT_NODE_MODULES=/path/to/playwright/node_modules \
   tests/compose-acceptance.sh
 ```
 
-The script creates a unique Compose project, builds/starts the app, local SMTP
+The script creates a unique Compose project, builds candidate images with the
+explicit `compose.build.yaml` development overlay, then copies `compose.yaml`
+to a temporary directory and starts that copied file with `--no-build --pull
+never`. This checks the operator-facing image-only boundary without access to
+the source checkout. It builds/starts the app, local SMTP
 sink, and private-ingress fixture, exercises direct and ingress authentication,
 forged forwarding headers, a controlled explicit request, digest deduplication,
 project lifecycle, restart persistence, confirmed deletion, and re-import
@@ -43,22 +50,31 @@ uses synthetic content and the local sink. Choose unused loopback ports and
 keep the project name unique when running in parallel. The script refuses an
 already-existing project name and removes only the resources it created.
 
-To build the two versioned image tags without starting services:
+For local development or CI, add the explicit build overlay:
 
 ```sh
-docker build --network=none -t project-watchkeeper:0.1.0 -f Dockerfile .
-docker build --network=none -t project-watchkeeper-reviewer:0.1.0 -f Dockerfile.reviewer .
+docker compose -f compose.yaml -f compose.build.yaml build
 ```
 
 The pinned browser test image is `mcr.microsoft.com/playwright@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf`;
 `PLAYWRIGHT_NODE_MODULES` points to an external installation of Playwright
-1.64.1 mounted read-only into that disposable runner. The app image uses the
+1.64.1 mounted read-only into that disposable runner. Published images target
+`linux/amd64`, the platform exercised by container CI; other architectures are
+not claimed. GHCR publication runs only after all CI jobs pass on pushes to
+this repository's `main`. It publishes both full-commit `sha-<40-character-sha>`
+tags before advancing the moving `main` tags. Main-ref workflows do not cancel
+an active run, and a head check prevents an older commit from moving aliases
+backward. GitHub may replace a pending run with a newer pending run. The two
+`main` tag updates are sequential, so infrastructure failure between them can
+temporarily leave a mismatched pair. Production should pin both images to a
+matching commit or their reported digests. The app image uses the
 pinned Python 3.12 base in `Dockerfile`. The reviewer
-image uses OpenClaw 2026.10.5 by digest. The app runs as UID 1000, socket group
+image embeds its exact read-only runtime config at
+`/etc/watchkeeper/openclaw.json5` and uses OpenClaw 2026.10.5 by digest. The app runs as UID 1000, socket group
 2000, with a read-only root and a persistent state volume. Compose keeps the
 reviewer at UID 1000, drops all capabilities, disables networking, and mounts
-only the broker socket directory, inference-proxy socket directory, fixed
-read-only OpenClaw config, and its dedicated OAuth state volume. The proxy is
+only the broker socket directory, inference-proxy socket directory, and its
+dedicated OAuth state volume. The proxy is
 the only reviewer-side process attached to external networking. It permits
 only exact configured DNS names on HTTPS port 443 and rejects non-public DNS
 answers. The reviewer itself cannot reach a source account, database, SMTP, or
@@ -166,7 +182,9 @@ mounts a host Codex home.
 
 The live reviewer Compose profile is off by default. `--profile live-reviewer`
 starts the network-isolated worker and the narrowly allowlisted inference
-proxy. Before enabling it, provision the exact single OpenAI subscription
+proxy. The reviewer image contains the fixed read-only OpenClaw config at
+`/etc/watchkeeper/openclaw.json5`; it does not mount configuration from the
+host. Before enabling the profile, provision the exact single OpenAI subscription
 OAuth profile in the dedicated `reviewer-auth` volume using the supported
 OpenClaw authentication flow described in [reviewer operations](reviewer.md).
 No API-key fallback is enabled. No login, OAuth refresh, real inference, or
@@ -178,6 +196,11 @@ gates.
 ## Configuration reference
 
 The complete examples are in `compose.yaml` and `compose.production.yaml`.
+Set `WATCHKEEPER_IMAGE` and `WATCHKEEPER_REVIEWER_IMAGE` to matching full-SHA
+tags or digest references to select the deployment pair. Defaults use moving
+`:main` tags. A GHCR package may initially be private; the repository owner
+must set the desired visibility and verify anonymous pulls before operators
+rely on the pull flow. See [GitHub's container registry guidance](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
 The application validates settings at startup and supports `python -m
 watchkeeper --check-config` to report a content-free success or error.
 

@@ -4,9 +4,11 @@ USER root
 RUN groupadd --gid 2000 watchkeeper-sockets \
  && usermod --append --groups watchkeeper-sockets node \
  && install -d -o node -g watchkeeper-sockets -m 0750 /opt/watchkeeper /run/watchkeeper/broker /run/watchkeeper/proxy \
+ && install -d -o root -g root -m 0755 /etc/watchkeeper \
  && install -d -o node -g node -m 0700 /run/watchkeeper/openclaw-auth \
  && install -d -o node -g node -m 0700 /tmp/watchkeeper-review-runs
 COPY --chown=node:watchkeeper-sockets watchkeeper /opt/watchkeeper/watchkeeper
+COPY --chown=root:root --chmod=0444 runtime/openclaw/watchkeeper-review.json5 /etc/watchkeeper/openclaw.json5
 USER node
 ENV PYTHONPATH=/opt/watchkeeper PYTHONDONTWRITEBYTECODE=1 HOME=/tmp \
     OPENCLAW_STATE_DIR=/run/watchkeeper/openclaw-auth \
