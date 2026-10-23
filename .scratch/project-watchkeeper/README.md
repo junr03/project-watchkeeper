@@ -10,12 +10,12 @@ Replan with the user before materially exceeding the accepted scope or range.
 | Ticket | Blocked by | Execution |
 | --- | --- | --- |
 | [01: Demonstrate a Codex project becoming an attention item](issues/01-codex-attention-demo.md) | None | Complete — [verified synthetic evidence](../../docs/evidence-01.md) |
-| [02: Collect actual Codex threads with visible coverage](issues/02-codex-collection-coverage.md) | 01 | Planned |
-| [03: Assess unfinished outcomes through restricted OpenClaw review](issues/03-restricted-openclaw-review.md) | 01 | Planned |
-| [04: Make project decisions persist across reviews](issues/04-persistent-project-decisions.md) | 01 | Planned |
-| [05: Expire and delete stored project information](issues/05-retention-and-deletion.md) | 04 | Planned |
-| [06: Keep monitoring reliable through backlog and interruptions](issues/06-monitoring-recovery.md) | 02, 03 | Planned |
-| [07: Run the complete milestone from portable containers](issues/07-portable-container-milestone.md) | 05, 06 | Planned |
+| [02: Collect actual Codex threads with visible coverage](issues/02-codex-collection-coverage.md) | 01 | Implemented; 22 tests and actual Linux modern/legacy reader paths verified; Mac gate unverified |
+| [03: Assess unfinished outcomes through restricted OpenClaw review](issues/03-restricted-openclaw-review.md) | 01 | Implemented; 93 integrated tests and built-container containment verified; account/model gates unverified |
+| [04: Make project decisions persist across reviews](issues/04-persistent-project-decisions.md) | 01 | Complete — lifecycle and archive/retention verified with 05 |
+| [05: Expire and delete stored project information](issues/05-retention-and-deletion.md) | 04 | Complete — independent privacy, restore/crash, browser and retained-revision checks passed |
+| [06: Keep monitoring reliable through backlog and interruptions](issues/06-monitoring-recovery.md) | 02, 03 | Complete — recovery and combined container acceptance verified |
+| [07: Run the complete milestone from portable containers](issues/07-portable-container-milestone.md) | 05, 06 | Complete — 93 tests, container/browser journey, SMTP, restore and containment verified |
 
 ## First demo and frontier
 
@@ -64,3 +64,19 @@ flowchart LR
 - All implementation stays in project-watchkeeper. Other providers,
   remote-server collection, and Electricpeak edits/activation are outside
   this breakdown.
+
+## Review stack
+
+The approved ticket graph remains unchanged. Code review dependencies are
+01 → 02 → 04 → 03 → 06 → 05 → 07. This supplies intake exclusion
+enforcement, policy persistence, and privacy cleanup of scheduler/digest state
+in each reviewable slice. The approved execution graph is unchanged; the
+coordinator combines verified branches for review without merging GitHub PRs. No implementation PR is automatically merged.
+
+Current draft PRs: [01 / #2](https://github.com/junr03/project-watchkeeper/pull/2),
+[02 / #3](https://github.com/junr03/project-watchkeeper/pull/3),
+[04 / #4](https://github.com/junr03/project-watchkeeper/pull/4),
+[03 / #5](https://github.com/junr03/project-watchkeeper/pull/5),
+[05 / #6](https://github.com/junr03/project-watchkeeper/pull/6),
+[06 / #7](https://github.com/junr03/project-watchkeeper/pull/7),
+[07 / #8](https://github.com/junr03/project-watchkeeper/pull/8).

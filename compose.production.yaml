@@ -1,0 +1,58 @@
+# Example overlay for an operator-controlled host. Every secret source path is
+# supplied externally; this file contains no production values.
+services:
+  app:
+    environment:
+      WATCHKEEPER_INTAKE_TOKEN: ""
+      WATCHKEEPER_REVIEWER_TOKEN: ""
+      WATCHKEEPER_UI_USERNAME: ""
+      WATCHKEEPER_UI_PASSWORD: ""
+      WATCHKEEPER_INTAKE_TOKEN_FILE: /run/secrets/intake_token
+      WATCHKEEPER_REVIEWER_TOKEN_FILE: /run/secrets/reviewer_token
+      WATCHKEEPER_UI_USERNAME_FILE: /run/secrets/ui_username
+      WATCHKEEPER_UI_PASSWORD_FILE: /run/secrets/ui_password
+      WATCHKEEPER_REVIEWER_BROKER_TOKEN: ""
+      WATCHKEEPER_REVIEWER_BROKER_TOKEN_FILE: /run/secrets/reviewer_token
+      WATCHKEEPER_PUBLIC_BASE_URL: ${WATCHKEEPER_PUBLIC_BASE_URL:?set the private HTTPS origin}
+      WATCHKEEPER_ALLOWED_ORIGINS: ${WATCHKEEPER_ALLOWED_ORIGINS:?set the exact private HTTPS origin}
+      WATCHKEEPER_MAIL_TRANSPORT: smtp
+      WATCHKEEPER_MAIL_HOST: ${WATCHKEEPER_MAIL_HOST:?set an operator-selected SMTP host}
+      WATCHKEEPER_MAIL_PORT: ${WATCHKEEPER_MAIL_PORT:-587}
+      WATCHKEEPER_MAIL_SECURITY: ${WATCHKEEPER_MAIL_SECURITY:?choose starttls or ssl explicitly}
+      WATCHKEEPER_RECIPIENT: ${WATCHKEEPER_RECIPIENT:?set the fixed private recipient}
+      WATCHKEEPER_MAIL_SENDER: ${WATCHKEEPER_MAIL_SENDER:?set the fixed sender}
+    depends_on: !reset []
+    networks: !override [application, mail-egress, private-ingress]
+    ports: !reset []
+    secrets:
+      - intake_token
+      - reviewer_token
+      - ui_username
+      - ui_password
+
+  smtp-sink:
+    profiles: [demo-only]
+
+  reviewer:
+    environment:
+      WATCHKEEPER_REVIEWER_BROKER_TOKEN: ""
+      WATCHKEEPER_REVIEWER_BROKER_TOKEN_FILE: /run/secrets/reviewer_token
+    secrets: [reviewer_token]
+
+networks:
+  mail-egress:
+    name: ${WATCHKEEPER_MAIL_NETWORK:?set a private network with outbound SMTP-only policy}
+    external: true
+  private-ingress:
+    name: ${WATCHKEEPER_INGRESS_NETWORK:?set the private ingress network}
+    external: true
+
+secrets:
+  intake_token:
+    file: ${WATCHKEEPER_INTAKE_TOKEN_SECRET:?set a private secret file path}
+  reviewer_token:
+    file: ${WATCHKEEPER_REVIEWER_TOKEN_SECRET:?set a private secret file path}
+  ui_username:
+    file: ${WATCHKEEPER_UI_USERNAME_SECRET:?set a private secret file path}
+  ui_password:
+    file: ${WATCHKEEPER_UI_PASSWORD_SECRET:?set a private secret file path}

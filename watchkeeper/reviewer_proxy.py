@@ -26,6 +26,12 @@ def parse_host_allowlist(value: str) -> frozenset[str]:
     dns_name = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*\Z")
     if not hosts or any(not dns_name.fullmatch(host) for host in hosts):
         raise ProxyConfigurationError("inference host allowlist must contain exact DNS names")
+    for host in hosts:
+        try:
+            ip_address(host)
+        except ValueError:
+            continue
+        raise ProxyConfigurationError("inference host allowlist must not contain IP literals")
     return frozenset(hosts)
 
 
@@ -189,7 +195,7 @@ def main() -> int:
     """Run the separately networked, exact-host inference proxy."""
     try:
         allow_hosts = parse_host_allowlist(os.environ.get("WATCHKEEPER_INFERENCE_HOSTS", ""))
-        proxy = HTTPSConnectProxy(os.environ.get("WATCHKEEPER_PROXY_SOCKET", "/run/watchkeeper/inference.sock"),
+        proxy = HTTPSConnectProxy(os.environ.get("WATCHKEEPER_PROXY_SOCKET", "/run/watchkeeper/proxy/inference.sock"),
                                   allow_hosts).start()
     except (ProxyConfigurationError, OSError):
         print("inference proxy configuration failed", file=sys.stderr)

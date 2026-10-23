@@ -1021,6 +1021,12 @@ class WatchkeeperService:
             associations = {(r[0], r[1], r[2]) for r in c.execute("SELECT source_id,thread_id,project_id FROM project_threads")}
             incidents = [dict(r) for r in c.execute("SELECT incident_id,category,subject,failure_kind,status,first_seen,last_seen,occurrences,notified_at FROM health_incidents ORDER BY first_seen DESC")]
             runs = [dict(r) for r in c.execute("SELECT run_id,schedule_key,status,cursor_json,attempts,failure_kind,created_at,updated_at FROM monitoring_runs ORDER BY created_at DESC LIMIT 20")]
+            deliveries = [{"status": r["status"], "created_at": r["created_at"],
+                           "updated_at": r["updated_at"], "attempts": r["attempts"],
+                           "retry_after": r["retry_after"],
+                           "findings": len(json.loads(r["delivery_ids_json"])),
+                           "notices": len(json.loads(r["notice_ids_json"]))}
+                          for r in c.execute("SELECT * FROM delivery_batches ORDER BY created_at DESC,rowid DESC LIMIT 20")]
         result = []
         for row in projects:
             item = dict(row)
@@ -1048,6 +1054,7 @@ class WatchkeeperService:
                 "project_threads": [{"source_id": s, "thread_id": t, "project_id": p}
                                     for s, t, p in sorted(associations)],
                 "monitoring": {"health_incidents": incidents, "review_runs": runs,
+                               "deliveries": deliveries,
                                "open_notices": [i for i in incidents if i["status"] == "open" and i["occurrences"] >= 2]}}
 
     @_serialized

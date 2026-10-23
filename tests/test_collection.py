@@ -243,7 +243,7 @@ class CollectionHttpTest(unittest.TestCase):
         with urlopen(page_request) as response:
             page = response.read().decode()
             csrf = response.headers["Set-Cookie"].split(";", 1)[0].split("=", 1)[1]
-        self.assertIn("Capture pending digest", page)
+        self.assertIn("Send pending digest", page)
         deliver = Request(self.base + "/api/deliver", data=b"", method="POST", headers={
             "Authorization": "Basic " + base64.b64encode(b"alice:private-pass").decode(),
             "Origin": self.base, "Cookie": f"pw_csrf={csrf}", "X-CSRF-Token": csrf})

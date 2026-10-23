@@ -14,7 +14,8 @@ MAX_REVIEW_BYTES = 256_000
 
 
 class _UnixHTTPServer(socketserver.ThreadingUnixStreamServer):
-    daemon_threads = True
+    daemon_threads = False
+    block_on_close = True
     allow_reuse_address = False
 
     def __init__(self, path, app, token):
@@ -28,7 +29,8 @@ class _UnixHTTPServer(socketserver.ThreadingUnixStreamServer):
         super().__init__(self.server_address, _BrokerHandler)
 
     def server_bind(self):
-        Path(self.server_address).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        Path(self.server_address).parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+        os.chmod(Path(self.server_address).parent, 0o750)
         if os.path.lexists(self.server_address):
             if not stat.S_ISSOCK(os.lstat(self.server_address).st_mode):
                 raise ValueError("reviewer broker path exists and is not a socket")

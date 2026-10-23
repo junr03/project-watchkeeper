@@ -1,0 +1,15 @@
+# Optional overlay when the selected SMTP relay requires authentication.
+services:
+  app:
+    environment:
+      WATCHKEEPER_MAIL_USERNAME_FILE: /run/secrets/mail_username
+      WATCHKEEPER_MAIL_PASSWORD_FILE: /run/secrets/mail_password
+    secrets:
+      - mail_username
+      - mail_password
+
+secrets:
+  mail_username:
+    file: ${WATCHKEEPER_MAIL_USERNAME_SECRET:?set a private secret file path}
+  mail_password:
+    file: ${WATCHKEEPER_MAIL_PASSWORD_SECRET:?set a private secret file path}

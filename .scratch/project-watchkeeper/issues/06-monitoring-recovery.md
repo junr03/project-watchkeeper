@@ -10,7 +10,7 @@
 
 **Status:** ready-for-agent
 
-**Execution:** Implemented; coordinator-verified recovery checkpoint. Combined lifecycle/privacy acceptance remains in ticket 07.
+**Execution:** Complete — coordinator independently verified recovery and combined lifecycle/privacy/container acceptance. See [evidence](../../../docs/evidence-07.md).
 
 **Branch:** `jnr/06-monitoring-recovery`, based on verified collection/reviewer checkpoint `87cf00e`.
 
@@ -18,9 +18,9 @@
 
 | Work ID | Deliverable | Depends on | Owner | State | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| W1 | Run bounded newest-first historical discovery and daily review with durable checkpoints | None | Luna `collection_luna` / coordinator verification | Verified synthetic checkpoint | Multiple capped runs converge on available history and resume after interruption without falsely declaring complete coverage |
-| W2 | Turn source/reviewer failures into visible health state and deduplicated collection notices | W1 | Luna `collection_luna` / coordinator verification | Verified synthetic checkpoint | Sleep, quota, expired login, and persistent retrieval failures produce the specified distinct UI/digest behavior |
-| W3 | Make digest scheduling and outbox recovery preserve meaningful deduplication | W1, W2 | Luna `collection_luna` / coordinator verification | Verified synthetic checkpoint | Crash and ambiguous-acceptance scenarios preserve delivery evidence and avoid treating failed review as empty success |
+| W1 | Run bounded newest-first historical discovery and daily review with durable checkpoints | None | Luna `collection_luna` / coordinator verification | Verified | Multiple capped runs converge on available history and resume after interruption without falsely declaring complete coverage |
+| W2 | Turn source/reviewer failures into visible health state and deduplicated collection notices | W1 | Luna `collection_luna` / coordinator verification | Verified | Sleep, quota, expired login, and persistent retrieval failures produce the specified distinct UI/digest behavior |
+| W3 | Make digest scheduling and outbox recovery preserve meaningful deduplication | W1, W2 | Luna `collection_luna` / coordinator verification | Verified | Crash and ambiguous-acceptance scenarios preserve delivery evidence and avoid treating failed review as empty success |
 
 ## Acceptance criteria
 
@@ -32,7 +32,7 @@
 - [x] No paid model API fallback or silent billing/authentication change occurs.
 - [x] The durable outbox deduplicates meaningful findings against successful delivery and records ambiguous email acceptance honestly.
 - [x] Restart recovery preserves user decisions and notification history established by the application contract.
-- [ ] Use existing decision interfaces without taking ownership of another ticket's in-flight changes; verify combined lifecycle/privacy scenarios in ticket 07.
+- [x] Use existing decision interfaces without taking ownership of another ticket's in-flight changes; verify combined lifecycle/privacy scenarios in ticket 07.
 
 ## References
 
