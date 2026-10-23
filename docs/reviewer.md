@@ -1,8 +1,8 @@
 # Restricted OpenClaw reviewer
 
-The reviewer is a one-shot, subscription-authenticated assessor. It receives a
-bounded snapshot from the reviewer-only application broker, returns structured
-proposals, and has no source-account login or user-action endpoint. Captured
+The reviewer is a scheduled, subscription-authenticated worker. It claims one
+bounded job at a time from the reviewer-only application broker, returns
+structured proposals, and has no source-account login or user-action endpoint. Captured
 conversation text is untrusted evidence. The pinned OpenClaw configuration
 denies every agent tool, permits only the bundled OpenAI provider plugin, has an
 empty MCP server list, and explicitly selects `agentRuntime.id: openclaw`.
@@ -44,9 +44,11 @@ docker run --rm --network none --read-only --cap-drop ALL \
   node --input-type=module -e 'import fs from "node:fs"; const m=await import("/app/dist/agent-tools-7XKjvsM9.mjs"); const config=JSON.parse(fs.readFileSync("/review.json5","utf8")); const tools=await m.n({config,agentId:"main",workspaceDir:"/tmp",sessionKey:"agent:main:watchkeeper-test"}); console.log(JSON.stringify({tools:tools.map(t=>t.name)})); process.exit(tools.length===0?0:1);'
 ```
 
-To verify that an empty auth mount fails before evidence or
-broker access, run the repository worker as follows (the command is expected
-to exit with status 4 and print only the authentication failure JSON):
+To verify that an empty auth mount fails before any evidence job is claimed,
+run the repository worker in a deployment with the authenticated application
+broker socket mounted at `/run/watchkeeper/app.sock`. Set
+`WATCHKEEPER_REVIEW_ONCE=1` to perform exactly one preflight and exit (status 4
+for authentication failure); the default worker polls continuously.
 
 ```sh
 docker run --rm --network none --read-only --cap-drop ALL \
@@ -55,7 +57,9 @@ docker run --rm --network none --read-only --cap-drop ALL \
   --user 1000:1000 -e HOME=/tmp -e OPENCLAW_STATE_DIR=/run/watchkeeper/openclaw-auth \
   -e PYTHONPATH=/opt/watchkeeper -e PYTHONDONTWRITEBYTECODE=1 \
   -e WATCHKEEPER_REVIEWER_BROKER_TOKEN=synthetic-test-token \
+  -e WATCHKEEPER_REVIEW_ONCE=1 \
   -v "$PWD:/opt/watchkeeper:ro" \
+  -v "$WATCHKEEPER_APP_SOCKET:/run/watchkeeper/app.sock" \
   -v "$PWD/runtime/openclaw/watchkeeper-review.json5:/etc/watchkeeper/openclaw.json5:ro" \
   ghcr.io/openclaw/openclaw@sha256:f40d1e66fd14d8c5b49c832f4100f83b53fdc01f5108f7db11de38fd0ee6dbe5 \
   python3 -m watchkeeper.reviewer
@@ -92,9 +96,11 @@ transcript and prompt artifacts.
 Run the whole reviewer container with no network interface, a read-only root,
 no added capabilities, no-new-privileges, and only two narrow Unix sockets:
 
-- The application broker exposes only authenticated `GET /api/review-input`
-  and `POST /api/reviews`. Other paths and user actions are rejected by the
-  broker itself.
+- The application broker exposes authenticated reviewer health and
+  lease-bound job claim, completion, and failure routes. The legacy bounded
+  `GET /api/review-input` and `POST /api/reviews` routes remain available, but
+  the scheduled worker uses the job routes. User actions are rejected by this
+  broker.
 - The inference proxy exposes HTTPS `CONNECT` only to exact configured DNS
   names on port 443. It resolves the destination, rejects any private or
   reserved address, and connects to the selected public IP. No redirects or
@@ -145,7 +151,8 @@ revision. It derives elapsed progress from the newest stored source timestamp
 across every referenced source/thread pair, so an old selected message cannot
 hide newer observed work. Missing, unavailable, malformed, or stale source
 context is fail-closed. Inferred eligibility additionally requires a concrete
-next action, the configurable three-day inactivity default, and explicit
+next action, the configurable `WATCHKEEPER_INFERRED_AFTER_DAYS` inactivity
+threshold (default three days), and explicit
 per-thread `completeness: "complete"` with no reported gaps. A trusted active
 thread signal, external dependency, uncertain completion, uncertain grouping,
 or incomplete coverage cannot become an emailed attention item. Aggregate
@@ -154,8 +161,7 @@ list; a new partial scan cannot inherit an older completed thread record as
 proof of current inactivity. The inferred-action check requires a recognized
 action verb followed by an object (for example, “Choose three planting zones”);
 valid phrasings outside that conservative list may be held as proposals until
-reviewed. The runtime currently uses the three-day default; service policy
-remains the authority.
+reviewed. Service policy remains the authority.
 
 The reviewer HTTP contract is separate from a review run's status. The worker
 emits content-free JSON status and distinguishes `quota`, `authentication`,
@@ -187,7 +193,7 @@ results.
 No subscription login or live model judgment was performed for this change.
 The image config validation and local policy/broker/proxy tests do not prove
 OAuth renewal, inference-host compatibility, semantic accuracy, false-positive
-rates, or hostile-input resistance in a real model run. Backlog scheduling and
-durable resumable review-window selection remain a separate integration; the
-current worker fails closed if the supplied bounded snapshot exceeds its input
-limit instead of silently truncating it.
+rates, or hostile-input resistance in a real model run. The application
+scheduler gives each local day a bounded newest-evidence review window followed
+by resumable historical backfill windows. Every worker job has a byte-bounded
+snapshot and durable lease; an incomplete or stale result is discarded.
