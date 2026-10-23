@@ -172,9 +172,9 @@ class MonitoringScheduler:
         partial_threads = []
         with self.db.connect() as c:
             for source_id, thread_id in pairs:
-                thread_rows = c.execute("SELECT observation_id,revision FROM observations WHERE source_id=? AND thread_id=? ORDER BY observation_id,revision",
+                thread_rows = c.execute("SELECT observation_id,revision FROM reviewable_observations WHERE source_id=? AND thread_id=? ORDER BY observation_id,revision",
                                         (source_id, thread_id)).fetchall()
-                thread_row = c.execute("SELECT COUNT(*) AS n,MAX(captured_at) AS captured,MAX(source_timestamp) AS source_time FROM observations WHERE source_id=? AND thread_id=?",
+                thread_row = c.execute("SELECT COUNT(*) AS n,MAX(captured_at) AS captured,MAX(source_timestamp) AS source_time FROM reviewable_observations WHERE source_id=? AND thread_id=?",
                                        (source_id, thread_id)).fetchone()
                 thread_fingerprint = hashlib.sha256(json.dumps(
                     [(item["observation_id"], item["revision"]) for item in thread_rows],

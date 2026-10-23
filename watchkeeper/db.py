@@ -7,7 +7,7 @@ from pathlib import Path
 from contextlib import contextmanager
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Database:
@@ -28,6 +28,7 @@ class Database:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA secure_delete=ON")
             if self.path != ":memory:" and Path(self.path).exists():
                 Path(self.path).chmod(0o600)
             yield conn
@@ -37,10 +38,11 @@ class Database:
     def _initialize(self):
         with self.connect() as c:
             version = c.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, SCHEMA_VERSION):
                 raise RuntimeError(f"unsupported database schema version {version}")
             if version == 0:
                 c.executescript("""
+                    BEGIN IMMEDIATE;
                     CREATE TABLE observations (
                         observation_id TEXT PRIMARY KEY,
                         source_id TEXT NOT NULL,
@@ -80,8 +82,8 @@ class Database:
                         delivered_at TEXT
                     );
                     PRAGMA user_version=1;
+                    COMMIT;
                 """)
-                c.commit()
                 version = 1
             if version == 1:
                 c.execute("BEGIN IMMEDIATE")
@@ -143,6 +145,35 @@ class Database:
                         c.execute("INSERT OR IGNORE INTO project_threads VALUES(?,?,?,?)",
                                   (evidence["source_id"], evidence["thread_id"], project["project_id"], project["updated_at"]))
                 c.execute("PRAGMA user_version=3")
+                c.commit()
+                version = 3
+            if version == 3:
+                c.execute("BEGIN IMMEDIATE")
+                c.execute("""CREATE TABLE expired_observations (
+                    observation_id TEXT NOT NULL,
+                    revision TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    first_captured_at TEXT NOT NULL,
+                    expired_at TEXT NOT NULL,
+                    PRIMARY KEY(observation_id,revision)
+                )""")
+                c.execute("CREATE INDEX expired_observations_thread ON expired_observations(source_id,thread_id)")
+                c.execute("""CREATE TABLE thread_progress_watermarks (
+                    source_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    last_progress_at TEXT NOT NULL,
+                    revision TEXT NOT NULL,
+                    last_captured_at TEXT NOT NULL,
+                    PRIMARY KEY(source_id,thread_id)
+                )""")
+                c.execute("""CREATE TABLE privacy_journal_state (
+                    singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),
+                    last_seq INTEGER NOT NULL
+                )""")
+                c.execute("INSERT INTO privacy_journal_state VALUES(1,0)")
+                c.execute("PRAGMA user_version=4")
                 c.commit()
 
     @staticmethod

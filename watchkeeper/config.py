@@ -15,6 +15,8 @@ class Config:
     recipient: str = "watchkeeper-demo@example.invalid"
     public_base_url: str = "http://127.0.0.1:8765"
     stale_after_seconds: int = 3600
+    transcript_retention_days: int = 30
+    privacy_journal: Path | None = None
     inferred_after_days: int = 3
     schedule_timezone: str = "UTC"
     review_time: str = "08:00"
@@ -33,6 +35,12 @@ class Config:
             raise ValueError("recipient must be a single safe address")
         if "\r" in self.public_base_url or "\n" in self.public_base_url:
             raise ValueError("public_base_url must be a single URL")
+        if type(self.transcript_retention_days) is not int or not 1 <= self.transcript_retention_days <= 36500:
+            raise ValueError("transcript_retention_days must be an integer from 1 to 36500")
+        journal = self.privacy_journal or Path(str(self.database) + ".privacy.jsonl")
+        if Path(journal).resolve() == Path(self.database).resolve():
+            raise ValueError("privacy journal must be a separate file from the database")
+        object.__setattr__(self, "privacy_journal", Path(journal))
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -52,6 +60,8 @@ class Config:
             recipient=os.environ.get("WATCHKEEPER_RECIPIENT", "watchkeeper-demo@example.invalid"),
             public_base_url=os.environ.get("WATCHKEEPER_PUBLIC_BASE_URL", "http://127.0.0.1:8765"),
             stale_after_seconds=int(os.environ.get("WATCHKEEPER_STALE_AFTER_SECONDS", "3600")),
+            transcript_retention_days=int(os.environ.get("WATCHKEEPER_TRANSCRIPT_RETENTION_DAYS", "30")),
+            privacy_journal=Path(os.environ["WATCHKEEPER_PRIVACY_JOURNAL"]) if os.environ.get("WATCHKEEPER_PRIVACY_JOURNAL") else None,
             inferred_after_days=int(os.environ.get("WATCHKEEPER_INFERRED_AFTER_DAYS", "3")),
             schedule_timezone=os.environ.get("WATCHKEEPER_SCHEDULE_TIMEZONE", "UTC"),
             review_time=os.environ.get("WATCHKEEPER_REVIEW_TIME", "08:00"),

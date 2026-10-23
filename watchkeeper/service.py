@@ -12,6 +12,8 @@ from .db import Database
 from .delivery import DeliveryNotAccepted, fingerprint
 from .intake import Intake
 from .policy import validate_proposal
+from .privacy import PrivacyManager
+from .evidence import install_reviewable_observations
 from .scheduler import MonitoringScheduler
 
 
@@ -31,7 +33,8 @@ def iso(value: datetime) -> str:
 
 class WatchkeeperService:
     def __init__(self, database: Database, email_sink, clock=None, stale_after_seconds=3600, inferred_after_days=3,
-                 *, schedule_timezone="UTC", review_time="08:00", digest_time="08:15",
+                 transcript_retention_days=30, privacy_journal=None,
+                 privacy_purge_hooks=None, captured_email_dir=None, *, schedule_timezone="UTC", review_time="08:00", digest_time="08:15",
                  review_window_limit=100, review_windows_per_day=4, review_lease_seconds=300,
                  review_window_bytes=180_000):
         self.db = database
@@ -49,10 +52,31 @@ class WatchkeeperService:
                                              window_byte_limit=review_window_bytes)
         with self.db.connect() as c:
             c.execute("CREATE TABLE IF NOT EXISTS project_assessment_guards (project_id TEXT PRIMARY KEY, guard_json TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            install_reviewable_observations(c)
+        self.privacy = PrivacyManager(database,
+            privacy_journal or f"{database.path}.privacy.jsonl", captured_email_dir,
+            transcript_retention_days, self.clock, purge_hooks=[self.privacy_purge_hook, *(privacy_purge_hooks or [])])
+        self.privacy.replay()
+        self.privacy.expire()
 
     @_serialized
     def ingest(self, batch: dict) -> dict:
+        self.privacy.expire()
+        required = {"source_id", "cursor", "available", "observations"}
+        optional = {"coverage", "thread_coverage"}
+        if (isinstance(batch, dict) and required <= set(batch) and set(batch) <= required | optional and
+                isinstance(batch.get("observations"), list) and
+                all(isinstance(item, dict) and all(isinstance(item.get(k), str)
+                    for k in ("thread_id", "message_id", "revision")) for item in batch["observations"])):
+            batch, excluded = self.privacy.filter_excluded(batch)
+            batch, suppressed = self.privacy.filter_expired_replays(batch)
+        else:
+            suppressed = 0
+            excluded = 0
         result = self.intake.ingest(batch)
+        self.privacy.refresh_watermarks()
+        result["expired_replays_suppressed"] = suppressed + result.get("expired_replays_suppressed", 0)
+        result["excluded_observations_skipped"] = excluded
         coverage = batch.get("coverage", {}) if isinstance(batch, dict) else {}
         failure = coverage.get("failure", "none") if isinstance(coverage, dict) else "none"
         source_id = batch.get("source_id", "unknown") if isinstance(batch, dict) else "unknown"
@@ -61,6 +85,35 @@ class WatchkeeperService:
         else:
             self.scheduler.recover("source", source_id)
         return result
+
+    @_serialized
+    def expire_retention(self):
+        """Public maintenance hook for the later daily scheduler."""
+        return self.privacy.expire()
+
+    @_serialized
+    def deletion_preview(self, project_id):
+        preview = self.privacy.preview(project_id)
+        projects = [project_id, *preview["affected_projects"]]
+        with self.db.connect() as c:
+            marks = ",".join("?" for _ in projects)
+            rows = c.execute(f"SELECT delivery_id,status FROM outbox WHERE project_id IN ({marks})",
+                             projects).fetchall()
+            delivery_ids = {row["delivery_id"] for row in rows}
+            capture_ids = set(delivery_ids)
+            for batch in c.execute("SELECT digest_id,delivery_ids_json FROM delivery_batches"):
+                if delivery_ids.intersection(json.loads(batch["delivery_ids_json"])):
+                    capture_ids.add(batch["digest_id"])
+        preview["pending_notifications"] = sum(row["status"] in {"pending", "sending"} for row in rows)
+        preview["captured_emails"] = (sum(
+            (self.privacy.email_dir / (re.sub(r"[^A-Za-z0-9._-]", "_", capture_id) + ".eml")).is_file()
+            for capture_id in capture_ids) if self.privacy.email_dir is not None else 0)
+        preview["external_mail_cannot_be_recalled"] = True
+        return preview
+
+    @_serialized
+    def delete_project(self, project_id, impact_token, *, confirmed):
+        return self.privacy.delete_project(project_id, impact_token, confirmed=confirmed)
 
     def _excluded(self, c, source_id, thread_id):
         return (c.execute("SELECT 1 FROM excluded_sources WHERE source_id=?", (source_id,)).fetchone() is not None or
@@ -93,8 +146,13 @@ class WatchkeeperService:
             if not isinstance(supplied_threads, dict):
                 supplied_threads = {}
             with self.db.connect() as c:
-                thread_ids = [r[0] for r in c.execute("SELECT DISTINCT thread_id FROM observations WHERE source_id=?",
-                                                       (source_id,))]
+                thread_ids = {r[0] for r in c.execute("SELECT thread_id FROM reviewable_observations WHERE source_id=? UNION "
+                                                       "SELECT thread_id FROM thread_progress_watermarks WHERE source_id=?",
+                                                       (source_id, source_id))}
+                thread_ids.update(supplied_threads)
+                watermarks = {r["thread_id"]: dict(r) for r in c.execute(
+                    "SELECT thread_id,last_progress_at,revision,last_captured_at FROM thread_progress_watermarks WHERE source_id=?",
+                    (source_id,))}
             trusted_threads = {}
             for thread_id in thread_ids:
                 thread = supplied_threads.get(thread_id, {})
@@ -112,6 +170,11 @@ class WatchkeeperService:
                 thread["coverage_complete"] = bool(thread_complete)
                 thread.setdefault("gaps", [] if thread_complete else ["Source coverage is incomplete"])
                 thread["active"] = thread.get("active") is True or thread.get("status") in {"active", "running", "in_progress"} or thread_activity == "observed-running"
+                watermark = watermarks.get(thread_id)
+                if watermark:
+                    thread["last_progress_at"] = watermark["last_progress_at"]
+                    thread["last_progress_revision"] = watermark["revision"]
+                    thread["last_progress_captured_at"] = watermark["last_captured_at"]
                 trusted_threads[thread_id] = thread
             item["threads"] = trusted_threads
             normalized[source_id] = item
@@ -119,9 +182,10 @@ class WatchkeeperService:
 
     @_serialized
     def review(self, proposal: dict, *, _incomplete_threads=()) -> dict:
+        self.privacy.expire()
         with self.db.connect() as c:
             c.execute("BEGIN IMMEDIATE")
-            rows = c.execute("SELECT * FROM observations").fetchall()
+            rows = c.execute("SELECT * FROM reviewable_observations").fetchall()
             all_obs = {row["observation_id"]: dict(row) for row in rows}
             sources = self._source_context()
             for source_id, thread_id in _incomplete_threads:
@@ -148,7 +212,10 @@ class WatchkeeperService:
             requested_id = assessment["project_id"]
             owner_mismatch = any(owner != requested_id for owner in owners)
             grouping_conflict = len(owners) > 1
+            established_pairs = {(row["source_id"], row["thread_id"]) for row in related
+                                 if row["project_id"] == requested_id}
             hidden_alias = any(row["project_id"] != requested_id and
+                               (row["source_id"], row["thread_id"]) not in established_pairs and
                                (row["disposition"] != "open" or row["archived"] or
                                 (row["snooze_until"] is not None and row["snooze_until"] > iso(self.clock())))
                                for row in related)
@@ -239,7 +306,7 @@ class WatchkeeperService:
                 pairs = sorted({(row["source_id"], row["thread_id"]) for row in evidence_rows})
                 guard = {}
                 for source_id, thread_id in pairs:
-                    thread_rows = c.execute("SELECT observation_id,revision FROM observations WHERE source_id=? AND thread_id=? ORDER BY observation_id,revision",
+                    thread_rows = c.execute("SELECT observation_id,revision FROM reviewable_observations WHERE source_id=? AND thread_id=? ORDER BY observation_id,revision",
                                             (source_id, thread_id)).fetchall()
                     digest = hashlib.sha256(json.dumps([(r["observation_id"], r["revision"]) for r in thread_rows],
                                                        separators=(",", ":")).encode()).hexdigest()
@@ -289,8 +356,10 @@ class WatchkeeperService:
                    project_id, assessment["outcome"], assessment["next_action"], self.db.json(evidence),
                    assessment.get("status", "uncertain_grouping"), assessment.get("grouping_confidence", "uncertain"), reason))
 
+    @_serialized
     def review_input(self, *, cursor=None, limit=500, byte_limit=180_000, recent=False) -> dict:
-        """Return observations eligible for review and a secret-free register view."""
+        """Return bounded raw/retained evidence and a secret-free register view."""
+        self.privacy.expire()
         sources = self._source_context()
         with self.db.connect() as c:
             cursor_clause = ""
@@ -313,7 +382,7 @@ class WatchkeeperService:
                 raise ValueError("review window byte limit must be between 180000 and 220000")
             rows = c.execute("""SELECT DISTINCT o.observation_id,o.source_id,o.thread_id,o.message_id,o.revision,
                 o.source_timestamp,o.captured_at,o.locator,o.text
-                FROM observations o LEFT JOIN project_threads t ON
+                FROM reviewable_observations o LEFT JOIN project_threads t ON
                   t.source_id=o.source_id AND t.thread_id=o.thread_id
                 WHERE NOT EXISTS (SELECT 1 FROM excluded_sources x WHERE x.source_id=o.source_id)
                   AND NOT EXISTS (SELECT 1 FROM excluded_threads x WHERE x.source_id=o.source_id AND x.thread_id=o.thread_id)
@@ -439,7 +508,7 @@ class WatchkeeperService:
                     thread_order = ("captured_at DESC,julianday(source_timestamp) DESC,observation_id DESC"
                                     if recent else "julianday(source_timestamp) DESC,captured_at DESC,observation_id DESC")
                     thread_rows = [dict(row) for row in c.execute(
-                        "SELECT observation_id,source_id,thread_id,message_id,revision,source_timestamp,captured_at,locator,text FROM observations WHERE source_id=? AND thread_id=? ORDER BY " + thread_order + " LIMIT ?",
+                        "SELECT observation_id,source_id,thread_id,message_id,revision,source_timestamp,captured_at,locator,text FROM reviewable_observations WHERE source_id=? AND thread_id=? ORDER BY " + thread_order + " LIMIT ?",
                         (*pair, fetch_limit)).fetchall()]
                 nested_budget -= len(thread_rows)
                 complete_thread = len(thread_rows) <= limit and len(thread_rows) < fetch_limit
@@ -522,6 +591,7 @@ class WatchkeeperService:
 
     @_serialized
     def complete_review_job(self, run_id, lease_token, proposals):
+        self.privacy.expire()
         if not isinstance(proposals, list) or len(proposals) > 50:
             raise ValueError("job result must contain at most 50 proposals")
         now = self.clock()
@@ -536,7 +606,7 @@ class WatchkeeperService:
             revisions = snapshot.get("revisions", {}) if isinstance(snapshot, dict) else {}
             allowed_refs = set(revisions)
             current = {row["observation_id"]: row["revision"] for row in c.execute(
-                "SELECT observation_id,revision FROM observations").fetchall()}
+                "SELECT observation_id,revision FROM reviewable_observations").fetchall()}
             if any(current.get(observation_id) != value.get("revision")
                    for observation_id, value in revisions.items() if isinstance(value, dict)):
                 c.execute("UPDATE monitoring_runs SET status='retry',snapshot_json=NULL,lease_token=NULL,lease_until=NULL,updated_at=? WHERE run_id=?",
@@ -545,9 +615,9 @@ class WatchkeeperService:
                 return {"status": "stale", "reason": "evidence changed while review was running"}
             for pair_key, guard in snapshot.get("thread_guard", {}).items():
                 source_id, thread_id = pair_key.split("\0", 1)
-                thread_rows = c.execute("SELECT observation_id,revision FROM observations WHERE source_id=? AND thread_id=? ORDER BY observation_id,revision",
+                thread_rows = c.execute("SELECT observation_id,revision FROM reviewable_observations WHERE source_id=? AND thread_id=? ORDER BY observation_id,revision",
                                         (source_id, thread_id)).fetchall()
-                latest = c.execute("SELECT COUNT(*) AS n,MAX(captured_at) AS captured,MAX(source_timestamp) AS source_time FROM observations WHERE source_id=? AND thread_id=?",
+                latest = c.execute("SELECT COUNT(*) AS n,MAX(captured_at) AS captured,MAX(source_timestamp) AS source_time FROM reviewable_observations WHERE source_id=? AND thread_id=?",
                                    (source_id, thread_id)).fetchone()
                 digest = hashlib.sha256(json.dumps([(r["observation_id"], r["revision"]) for r in thread_rows],
                                                    separators=(",", ":")).encode()).hexdigest()
@@ -604,7 +674,7 @@ class WatchkeeperService:
             if c.execute("SELECT 1 FROM excluded_sources WHERE source_id=?", (source_id,)).fetchone() or c.execute(
                     "SELECT 1 FROM excluded_threads WHERE source_id=? AND thread_id=?", (source_id, thread_id)).fetchone():
                 return False
-            current = c.execute("SELECT revision FROM observations WHERE observation_id=?", (item["observation_id"],)).fetchone()
+            current = c.execute("SELECT revision FROM reviewable_observations WHERE observation_id=?", (item["observation_id"],)).fetchone()
             if current is None or current["revision"] != item["revision"]:
                 return False
             source = sources.get(source_id)
@@ -616,7 +686,7 @@ class WatchkeeperService:
             by_thread.setdefault((source_id, thread_id), []).append(item)
         for (source_id, thread_id), rows in by_thread.items():
             key = f"{source_id}\0{thread_id}"
-            current_rows = c.execute("SELECT observation_id,revision,source_timestamp,captured_at FROM observations WHERE source_id=? AND thread_id=? ORDER BY observation_id,revision",
+            current_rows = c.execute("SELECT observation_id,revision,source_timestamp,captured_at FROM reviewable_observations WHERE source_id=? AND thread_id=? ORDER BY observation_id,revision",
                                      (source_id, thread_id)).fetchall()
             current_digest = hashlib.sha256(json.dumps([(r["observation_id"], r["revision"]) for r in current_rows],
                                                         separators=(",", ":")).encode()).hexdigest()
@@ -645,6 +715,7 @@ class WatchkeeperService:
     @_serialized
     def deliver_pending(self) -> dict:
         """Deliver one digest for the current eligible queue and open notices."""
+        self.privacy.expire()
         now = iso(self.clock())
         sources = self._source_context()
         with self.db.connect() as c:
@@ -842,42 +913,14 @@ class WatchkeeperService:
     def exclude_source(self, source_id: str, excluded: bool) -> dict:
         if not source_id or len(source_id) > 200:
             raise ValueError("invalid source_id")
-        with self.db.connect() as c:
-            c.execute("BEGIN IMMEDIATE")
-            if excluded:
-                c.execute("INSERT OR IGNORE INTO excluded_sources VALUES(?,?)", (source_id, iso(self.clock())))
-            else:
-                c.execute("DELETE FROM excluded_sources WHERE source_id=?", (source_id,))
-            # Any source-level exclusion change invalidates pending work for
-            # every project associated with that source, including discovered
-            # many-to-many links and explicit user locks.
-            c.execute("""UPDATE outbox SET status='cancelled' WHERE status='pending' AND project_id IN
-                (SELECT project_id FROM project_threads WHERE source_id=? UNION
-                 SELECT project_id FROM thread_ownership WHERE source_id=?)""", (source_id, source_id))
-            c.execute("UPDATE review_progress SET cursor_json=NULL,updated_at=? WHERE stream='history'", (iso(self.clock()),))
-            c.execute("UPDATE monitoring_runs SET status='invalidated',snapshot_json=NULL,lease_token=NULL,lease_until=NULL,updated_at=? WHERE status IN ('pending','retry','leased')",
-                      (iso(self.clock()),))
-            c.commit()
+        self.privacy.set_source_excluded(source_id, excluded)
         return {"source_id": source_id, "excluded": excluded}
 
     @_serialized
     def exclude_thread(self, source_id: str, thread_id: str, excluded: bool) -> dict:
         if not source_id or not thread_id or len(source_id) > 200 or len(thread_id) > 500:
             raise ValueError("invalid source or thread identity")
-        with self.db.connect() as c:
-            c.execute("BEGIN IMMEDIATE")
-            if excluded:
-                c.execute("INSERT OR IGNORE INTO excluded_threads VALUES(?,?,?)", (source_id, thread_id, iso(self.clock())))
-            else:
-                c.execute("DELETE FROM excluded_threads WHERE source_id=? AND thread_id=?", (source_id, thread_id))
-            c.execute("""UPDATE outbox SET status='cancelled' WHERE status='pending' AND project_id IN
-                (SELECT project_id FROM project_threads WHERE source_id=? AND thread_id=? UNION
-                 SELECT project_id FROM thread_ownership WHERE source_id=? AND thread_id=?)""",
-                      (source_id, thread_id, source_id, thread_id))
-            c.execute("UPDATE review_progress SET cursor_json=NULL,updated_at=? WHERE stream='history'", (iso(self.clock()),))
-            c.execute("UPDATE monitoring_runs SET status='invalidated',snapshot_json=NULL,lease_token=NULL,lease_until=NULL,updated_at=? WHERE status IN ('pending','retry','leased')",
-                      (iso(self.clock()),))
-            c.commit()
+        self.privacy.set_thread_excluded(source_id, thread_id, excluded)
         return {"source_id": source_id, "thread_id": thread_id, "excluded": excluded}
 
     @_serialized
@@ -892,7 +935,7 @@ class WatchkeeperService:
         now = iso(self.clock())
         with self.db.connect() as c:
             c.execute("BEGIN IMMEDIATE")
-            obs = [dict(r) for r in c.execute("SELECT * FROM observations WHERE source_id=? AND thread_id=?",
+            obs = [dict(r) for r in c.execute("SELECT * FROM reviewable_observations WHERE source_id=? AND thread_id=?",
                                                (source_id, thread_id)).fetchall()]
             if not obs:
                 raise KeyError("conversation not found")
@@ -1007,8 +1050,10 @@ class WatchkeeperService:
                 "monitoring": {"health_incidents": incidents, "review_runs": runs,
                                "open_notices": [i for i in incidents if i["status"] == "open" and i["occurrences"] >= 2]}}
 
+    @_serialized
     def scheduled_tick(self):
         """Create today's durable jobs and send the due daily digest."""
+        self.privacy.expire()
         self.scheduler.ensure_daily()
         if self.scheduler.due("digest"):
             key = self.scheduler.local_key("digest")
@@ -1061,6 +1106,7 @@ class WatchkeeperService:
                           (row["run_id"],))
         if pairs or obs or project_ids:
             c.execute("UPDATE review_progress SET cursor_json=NULL WHERE stream='history'")
+            c.execute("UPDATE monitoring_runs SET cursor_json=NULL WHERE cursor_json IS NOT NULL")
         if project_ids:
             project_placeholders = ",".join("?" for _ in project_ids)
             c.execute(f"DELETE FROM project_assessment_guards WHERE project_id IN ({project_placeholders})",
